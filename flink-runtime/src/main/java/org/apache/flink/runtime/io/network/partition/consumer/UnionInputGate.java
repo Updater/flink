@@ -101,7 +101,7 @@ public class UnionInputGate extends InputGate {
 		synchronized (inputGatesWithData) {
 			for (InputGate inputGate : inputGates) {
 				if (inputGate instanceof UnionInputGate) {
-					// if we want to add support for this, we need to implement pollNextBufferOrEvent()
+					// if we want to add support for this, we need to implement pollNext()
 					throw new UnsupportedOperationException("Cannot union a union of input gates.");
 				}
 
@@ -137,20 +137,8 @@ public class UnionInputGate extends InputGate {
 	}
 
 	@Override
-	public String getOwningTaskName() {
-		// all input gates have the same owning task
-		return inputGates[0].getOwningTaskName();
-	}
-
-	@Override
 	public boolean isFinished() {
-		for (InputGate inputGate : inputGates) {
-			if (!inputGate.isFinished()) {
-				return false;
-			}
-		}
-
-		return true;
+		return inputGatesWithRemainingData.isEmpty();
 	}
 
 	@Override
@@ -165,12 +153,12 @@ public class UnionInputGate extends InputGate {
 	}
 
 	@Override
-	public Optional<BufferOrEvent> getNextBufferOrEvent() throws IOException, InterruptedException {
+	public Optional<BufferOrEvent> getNext() throws IOException, InterruptedException {
 		return getNextBufferOrEvent(true);
 	}
 
 	@Override
-	public Optional<BufferOrEvent> pollNextBufferOrEvent() throws IOException, InterruptedException {
+	public Optional<BufferOrEvent> pollNext() throws IOException, InterruptedException {
 		return getNextBufferOrEvent(false);
 	}
 
@@ -199,28 +187,22 @@ public class UnionInputGate extends InputGate {
 	private Optional<InputWithData<InputGate, BufferOrEvent>> waitAndGetNextData(boolean blocking)
 			throws IOException, InterruptedException {
 		while (true) {
+			Optional<InputGate> inputGate = getInputGate(blocking);
+			if (!inputGate.isPresent()) {
+				return Optional.empty();
+			}
+
+			// In case of inputGatesWithData being inaccurate do not block on an empty inputGate, but just poll the data.
+			// Do not poll the gate under inputGatesWithData lock, since this can trigger notifications
+			// that could deadlock because of wrong locks taking order.
+			Optional<BufferOrEvent> bufferOrEvent = inputGate.get().pollNext();
+
 			synchronized (inputGatesWithData) {
-				while (inputGatesWithData.size() == 0) {
-					if (blocking) {
-						inputGatesWithData.wait();
-					} else {
-						resetIsAvailable();
-						return Optional.empty();
-					}
-				}
-
-				Iterator<InputGate> inputGateIterator = inputGatesWithData.iterator();
-				final InputGate inputGate = inputGateIterator.next();
-				inputGateIterator.remove();
-
-				// In case of inputGatesWithData being inaccurate do not block on an empty inputGate, but just poll the data.
-				Optional<BufferOrEvent> bufferOrEvent = inputGate.pollNextBufferOrEvent();
-
 				if (bufferOrEvent.isPresent() && bufferOrEvent.get().moreAvailable()) {
 					// enqueue the inputGate at the end to avoid starvation
-					inputGatesWithData.add(inputGate);
-				} else {
-					inputGate.isAvailable().thenRun(() -> queueInputGate(inputGate));
+					inputGatesWithData.add(inputGate.get());
+				} else if (!inputGate.get().isFinished()) {
+					inputGate.get().isAvailable().thenRun(() -> queueInputGate(inputGate.get()));
 				}
 
 				if (inputGatesWithData.isEmpty()) {
@@ -229,7 +211,7 @@ public class UnionInputGate extends InputGate {
 
 				if (bufferOrEvent.isPresent()) {
 					return Optional.of(new InputWithData<>(
-						inputGate,
+						inputGate.get(),
 						bufferOrEvent.get(),
 						!inputGatesWithData.isEmpty()));
 				}
@@ -238,9 +220,9 @@ public class UnionInputGate extends InputGate {
 	}
 
 	private BufferOrEvent adjustForUnionInputGate(
-		BufferOrEvent bufferOrEvent,
-		InputGate inputGate,
-		boolean moreInputGatesAvailable) {
+			BufferOrEvent bufferOrEvent,
+			InputGate inputGate,
+			boolean moreInputGatesAvailable) {
 		// Set the channel index to identify the input channel (across all unioned input gates)
 		final int channelIndexOffset = inputGateToIndexOffsetMap.get(inputGate);
 
@@ -260,7 +242,19 @@ public class UnionInputGate extends InputGate {
 				throw new IllegalStateException("Couldn't find input gate in set of remaining " +
 					"input gates.");
 			}
+			if (isFinished()) {
+				markAvailable();
+			}
 		}
+	}
+
+	private void markAvailable() {
+		CompletableFuture<?> toNotfiy;
+		synchronized (inputGatesWithData) {
+			toNotfiy = isAvailable;
+			isAvailable = AVAILABLE;
+		}
+		toNotfiy.complete(null);
 	}
 
 	@Override
@@ -281,6 +275,10 @@ public class UnionInputGate extends InputGate {
 			}
 		}
 		return pageSize;
+	}
+
+	@Override
+	public void setup() {
 	}
 
 	@Override
@@ -310,6 +308,25 @@ public class UnionInputGate extends InputGate {
 
 		if (toNotify != null) {
 			toNotify.complete(null);
+		}
+	}
+
+	private Optional<InputGate> getInputGate(boolean blocking) throws InterruptedException {
+		synchronized (inputGatesWithData) {
+			while (inputGatesWithData.size() == 0) {
+				if (blocking) {
+					inputGatesWithData.wait();
+				} else {
+					resetIsAvailable();
+					return Optional.empty();
+				}
+			}
+
+			Iterator<InputGate> inputGateIterator = inputGatesWithData.iterator();
+			InputGate inputGate = inputGateIterator.next();
+			inputGateIterator.remove();
+
+			return Optional.of(inputGate);
 		}
 	}
 }

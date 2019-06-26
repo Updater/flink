@@ -18,14 +18,6 @@
 
 package org.apache.flink.table.plan.metadata
 
-import org.apache.flink.table.JDouble
-import org.apache.flink.table.calcite.FlinkContext
-import org.apache.flink.table.plan.nodes.calcite.{Expand, Rank}
-import org.apache.flink.table.plan.nodes.exec.NodeResourceConfig
-import org.apache.flink.table.plan.nodes.physical.batch._
-import org.apache.flink.table.plan.stats.ValueInterval
-import org.apache.flink.table.plan.util.{FlinkRelMdUtil, SortUtil}
-
 import org.apache.calcite.adapter.enumerable.EnumerableLimit
 import org.apache.calcite.plan.volcano.RelSubset
 import org.apache.calcite.rel.core._
@@ -33,6 +25,15 @@ import org.apache.calcite.rel.metadata._
 import org.apache.calcite.rel.{RelNode, SingleRel}
 import org.apache.calcite.rex.{RexLiteral, RexNode}
 import org.apache.calcite.util._
+import org.apache.flink.table.JDouble
+import org.apache.flink.table.api.PlannerConfigOptions
+import org.apache.flink.table.calcite.FlinkContext
+import org.apache.flink.table.plan.logical.{LogicalWindow, SlidingGroupWindow, TumblingGroupWindow}
+import org.apache.flink.table.plan.nodes.calcite.{Expand, Rank, WindowAggregate}
+import org.apache.flink.table.plan.nodes.physical.batch._
+import org.apache.flink.table.plan.stats.ValueInterval
+import org.apache.flink.table.plan.util.AggregateUtil.{hasTimeIntervalType, toLong}
+import org.apache.flink.table.plan.util.{FlinkRelMdUtil, SortUtil}
 
 import scala.collection.JavaConversions._
 
@@ -142,6 +143,8 @@ class FlinkRelMdRowCount private extends MetadataHandler[BuiltInMetadata.RowCoun
     val (grouping, isFinal, isMerge) = rel match {
       case agg: BatchExecGroupAggregateBase =>
         (ImmutableBitSet.of(agg.getGrouping: _*), agg.isFinal, agg.isMerge)
+      case windowAgg: BatchExecWindowAggregateBase =>
+        (ImmutableBitSet.of(windowAgg.getGrouping: _*), windowAgg.isFinal, windowAgg.isMerge)
       case _ => throw new IllegalArgumentException(s"Unknown aggregate type ${rel.getRelTypeName}!")
     }
     val ndvOfGroupKeysOnGlobalAgg: JDouble = if (grouping.isEmpty) {
@@ -168,7 +171,8 @@ class FlinkRelMdRowCount private extends MetadataHandler[BuiltInMetadata.RowCoun
     } else {
       val inputRowCnt = mq.getRowCount(input)
       val config = rel.getCluster.getPlanner.getContext.asInstanceOf[FlinkContext].getTableConfig
-      val parallelism = NodeResourceConfig.calOperatorParallelism(inputRowCnt, config.getConf)
+      val parallelism = (inputRowCnt /
+          config.getConf.getLong(PlannerConfigOptions.SQL_OPTIMIZER_ROWS_PER_LOCALAGG) + 1).toInt
       if (parallelism == 1) {
         ndvOfGroupKeysOnGlobalAgg
       } else if (grouping.isEmpty) {
@@ -185,16 +189,56 @@ class FlinkRelMdRowCount private extends MetadataHandler[BuiltInMetadata.RowCoun
     }
   }
 
-  // TODO supports window aggregate
+  def getRowCount(rel: WindowAggregate, mq: RelMetadataQuery): JDouble = {
+    val (ndvOfGroupKeys, inputRowCount) = getRowCountOfAgg(rel, rel.getGroupSet, 1, mq)
+    estimateRowCountOfWindowAgg(ndvOfGroupKeys, inputRowCount, rel.getWindow)
+  }
 
-  def getRowCount(rel: Window, mq: RelMetadataQuery): JDouble =
-    getRowCountOfOverWindow(rel, mq)
+  def getRowCount(rel: BatchExecWindowAggregateBase, mq: RelMetadataQuery): JDouble = {
+    val ndvOfGroupKeys = getRowCountOfBatchExecAgg(rel, mq)
+    val inputRowCount = mq.getRowCount(rel.getInput)
+    estimateRowCountOfWindowAgg(ndvOfGroupKeys, inputRowCount, rel.getWindow)
+  }
+
+  private def estimateRowCountOfWindowAgg(
+      ndv: JDouble,
+      inputRowCount: JDouble,
+      window: LogicalWindow): JDouble = {
+    if (ndv == null) {
+      null
+    } else {
+      // simply assume expand factor of TumblingWindow/SessionWindow/SlideWindowWithoutOverlap is 2
+      // SlideWindowWithOverlap is 4.
+      // Introduce expand factor here to distinguish output rowCount of normal agg with all kinds of
+      // window aggregates.
+      val expandFactorOfTumblingWindow = 2D
+      val expandFactorOfNoOverLapSlidingWindow = 2D
+      val expandFactorOfOverLapSlidingWindow = 4D
+      val expandFactorOfSessionWindow = 2D
+      window match {
+        case TumblingGroupWindow(_, _, size) if hasTimeIntervalType(size) =>
+          Math.min(expandFactorOfTumblingWindow * ndv, inputRowCount)
+        case SlidingGroupWindow(_, _, size, slide) if hasTimeIntervalType(size) =>
+          val sizeValue = toLong(size)
+          val slideValue = toLong(slide)
+          if (sizeValue > slideValue) {
+            // only slideWindow which has overlap may generates more records than input
+            expandFactorOfOverLapSlidingWindow * ndv
+          } else {
+            Math.min(expandFactorOfNoOverLapSlidingWindow * ndv, inputRowCount)
+          }
+        case _ => Math.min(expandFactorOfSessionWindow * ndv, inputRowCount)
+      }
+    }
+  }
+
+  def getRowCount(rel: Window, mq: RelMetadataQuery): JDouble = getRowCountOfOverAgg(rel, mq)
 
   def getRowCount(rel: BatchExecOverAggregate, mq: RelMetadataQuery): JDouble =
-    getRowCountOfOverWindow(rel, mq)
+    getRowCountOfOverAgg(rel, mq)
 
-  private def getRowCountOfOverWindow(overWindow: SingleRel, mq: RelMetadataQuery): JDouble =
-    mq.getRowCount(overWindow.getInput)
+  private def getRowCountOfOverAgg(overAgg: SingleRel, mq: RelMetadataQuery): JDouble =
+    mq.getRowCount(overAgg.getInput)
 
   def getRowCount(join: Join, mq: RelMetadataQuery): JDouble = {
     join.getJoinType match {

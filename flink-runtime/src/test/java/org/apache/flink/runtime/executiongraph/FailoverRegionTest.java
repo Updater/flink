@@ -114,7 +114,7 @@ public class FailoverRegionTest extends TestLogger {
 
 		// verify checkpoint has been completed successfully.
 		assertEquals(1, eg.getCheckpointCoordinator().getCheckpointStore().getNumberOfRetainedCheckpoints());
-		assertEquals(checkpointId, eg.getCheckpointCoordinator().getCheckpointStore().getLatestCheckpoint().getCheckpointID());
+		assertEquals(checkpointId, eg.getCheckpointCoordinator().getCheckpointStore().getLatestCheckpoint(false).getCheckpointID());
 
 		ev.getCurrentExecutionAttempt().fail(new Exception("Test Exception"));
 		assertEquals(JobStatus.CANCELLING, strategy.getFailoverRegion(ev).getState());
@@ -535,7 +535,7 @@ public class FailoverRegionTest extends TestLogger {
 
 		// verify checkpoint has been restored successfully.
 		assertEquals(1, eg.getCheckpointCoordinator().getCheckpointStore().getNumberOfRetainedCheckpoints());
-		assertEquals(checkpointId, eg.getCheckpointCoordinator().getCheckpointStore().getLatestCheckpoint().getCheckpointID());
+		assertEquals(checkpointId, eg.getCheckpointCoordinator().getCheckpointStore().getLatestCheckpoint(false).getCheckpointID());
 	}
 
 	private ExecutionGraph createSingleRegionExecutionGraph(RestartStrategy restartStrategy) throws Exception {
@@ -605,12 +605,17 @@ public class FailoverRegionTest extends TestLogger {
 
 	private static void enableCheckpointing(ExecutionGraph eg) {
 		ArrayList<ExecutionJobVertex> jobVertices = new ArrayList<>(eg.getAllVertices().values());
+		CheckpointCoordinatorConfiguration chkConfig = new CheckpointCoordinatorConfiguration(
+			1000,
+			100,
+			0,
+			1,
+			CheckpointRetentionPolicy.RETAIN_ON_CANCELLATION,
+			true,
+			false,
+			0);
 		eg.enableCheckpointing(
-				1000,
-				100,
-				0,
-				1,
-				CheckpointRetentionPolicy.RETAIN_ON_CANCELLATION,
+				chkConfig,
 				jobVertices,
 				jobVertices,
 				jobVertices,
@@ -684,7 +689,7 @@ public class FailoverRegionTest extends TestLogger {
 					new CheckpointMetrics(),
 					taskOperatorSubtaskStates);
 
-				checkpointCoordinator.receiveAcknowledgeMessage(acknowledgeCheckpoint);
+				checkpointCoordinator.receiveAcknowledgeMessage(acknowledgeCheckpoint, "Unknown location");
 			}
 		}
 	}

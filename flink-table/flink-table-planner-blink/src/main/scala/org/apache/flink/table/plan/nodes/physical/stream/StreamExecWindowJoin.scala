@@ -19,9 +19,8 @@
 package org.apache.flink.table.plan.nodes.physical.stream
 
 import org.apache.flink.api.common.functions.{FlatJoinFunction, FlatMapFunction, MapFunction}
-import org.apache.flink.api.common.typeinfo.TypeInformation
 import org.apache.flink.api.java.typeutils.ResultTypeQueryable
-import org.apache.flink.streaming.api.operators.co.KeyedCoProcessOperator
+import org.apache.flink.streaming.api.operators.co.LegacyKeyedCoProcessOperator
 import org.apache.flink.streaming.api.operators.{StreamFlatMap, StreamMap, TwoInputStreamOperator}
 import org.apache.flink.streaming.api.transformations.{OneInputTransformation, StreamTransformation, TwoInputTransformation, UnionTransformation}
 import org.apache.flink.table.api.{StreamTableEnvironment, TableException}
@@ -140,9 +139,10 @@ class StreamExecWindowJoin(
            FlinkJoinType.LEFT |
            FlinkJoinType.RIGHT |
            FlinkJoinType.FULL =>
-        val leftRowType = FlinkTypeFactory.toInternalRowType(getLeft.getRowType)
-        val rightRowType = FlinkTypeFactory.toInternalRowType(getRight.getRowType)
-        val returnType = FlinkTypeFactory.toInternalRowType(getRowType).toTypeInfo
+        val leftRowType = FlinkTypeFactory.toLogicalRowType(getLeft.getRowType)
+        val rightRowType = FlinkTypeFactory.toLogicalRowType(getRight.getRowType)
+        val returnType = BaseRowTypeInfo.of(
+          FlinkTypeFactory.toLogicalRowType(getRowType))
 
         val relativeWindowSize = leftUpperBound - leftLowerBound
         if (relativeWindowSize < 0) {
@@ -151,8 +151,8 @@ class StreamExecWindowJoin(
           createNegativeWindowSizeJoin(
             leftPlan,
             rightPlan,
-            leftRowType.getArity,
-            rightRowType.getArity,
+            leftRowType.getFieldCount,
+            rightRowType.getFieldCount,
             returnType)
         } else {
           // get the equi-keys and other conditions
@@ -209,7 +209,7 @@ class StreamExecWindowJoin(
     val allFilter = new FlatMapFunction[BaseRow, BaseRow] with ResultTypeQueryable[BaseRow] {
       override def flatMap(value: BaseRow, out: Collector[BaseRow]): Unit = {}
 
-      override def getProducedType: TypeInformation[BaseRow] = returnTypeInfo
+      override def getProducedType: BaseRowTypeInfo = returnTypeInfo
     }
 
     val leftPadder = new MapFunction[BaseRow, BaseRow] with ResultTypeQueryable[BaseRow] {
@@ -217,7 +217,7 @@ class StreamExecWindowJoin(
 
       override def map(value: BaseRow): BaseRow = paddingUtil.padLeft(value)
 
-      override def getProducedType: TypeInformation[BaseRow] = returnTypeInfo
+      override def getProducedType: BaseRowTypeInfo = returnTypeInfo
     }
 
     val rightPadder = new MapFunction[BaseRow, BaseRow] with ResultTypeQueryable[BaseRow] {
@@ -225,7 +225,7 @@ class StreamExecWindowJoin(
 
       override def map(value: BaseRow): BaseRow = paddingUtil.padRight(value)
 
-      override def getProducedType: TypeInformation[BaseRow] = returnTypeInfo
+      override def getProducedType: BaseRowTypeInfo = returnTypeInfo
     }
 
     val leftParallelism = leftPlan.getParallelism
@@ -293,7 +293,7 @@ class StreamExecWindowJoin(
       leftPlan,
       rightPlan,
       "Co-Process",
-      new KeyedCoProcessOperator(procJoinFunc).
+      new LegacyKeyedCoProcessOperator(procJoinFunc).
         asInstanceOf[TwoInputStreamOperator[BaseRow,BaseRow,BaseRow]],
       returnTypeInfo,
       leftPlan.getParallelism
@@ -340,12 +340,11 @@ class StreamExecWindowJoin(
       new KeyedCoProcessOperatorWithWatermarkDelay(rowJoinFunc, rowJoinFunc.getMaxOutputDelay)
         .asInstanceOf[TwoInputStreamOperator[BaseRow,BaseRow,BaseRow]],
       returnTypeInfo,
-      leftPlan.getParallelism
+      getResource.getParallelism
     )
 
-    if (leftKeys.isEmpty) {
-      ret.setParallelism(1)
-      ret.setMaxParallelism(1)
+    if (getResource.getMaxParallelism > 0) {
+      ret.setMaxParallelism(getResource.getMaxParallelism)
     }
 
     // set KeyType and Selector for state

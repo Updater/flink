@@ -24,7 +24,7 @@ import org.apache.flink.table.dataformat.BaseRow
 import org.apache.flink.table.functions.utils.TableSqlFunction
 import org.apache.flink.table.plan.nodes.exec.{ExecNode, StreamExecNode}
 import org.apache.flink.table.plan.nodes.logical.FlinkLogicalTableFunctionScan
-import org.apache.flink.table.plan.util.{CorrelateUtil, RelExplainUtil}
+import org.apache.flink.table.plan.util.RelExplainUtil
 import org.apache.flink.table.runtime.AbstractProcessStreamOperator
 
 import org.apache.calcite.plan.{RelOptCluster, RelTraitSet}
@@ -121,7 +121,7 @@ class StreamExecCorrelate(
       .asInstanceOf[StreamTransformation[BaseRow]]
     val operatorCtx = CodeGeneratorContext(tableEnv.getConfig)
       .setOperatorBaseClass(classOf[AbstractProcessStreamOperator[_]])
-    CorrelateCodeGenerator.generateCorrelateTransformation(
+    val transform = CorrelateCodeGenerator.generateCorrelateTransformation(
       tableEnv,
       operatorCtx,
       inputTransformation,
@@ -131,9 +131,13 @@ class StreamExecCorrelate(
       condition,
       outputRowType,
       joinType,
-      inputTransformation.getParallelism,
+      getResource.getParallelism,
       retainHeader = true,
       getExpressionString,
       "StreamExecCorrelate")
+    if (getResource.getMaxParallelism > 0) {
+      transform.setMaxParallelism(getResource.getMaxParallelism)
+    }
+    transform
   }
 }

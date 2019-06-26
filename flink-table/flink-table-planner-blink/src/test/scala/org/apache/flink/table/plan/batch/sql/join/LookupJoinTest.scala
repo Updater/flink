@@ -23,8 +23,9 @@ import org.apache.flink.table.calcite.CalciteConfig
 import org.apache.flink.table.plan.optimize.program.FlinkBatchProgram
 import org.apache.flink.table.plan.stream.sql.join.TestTemporalTable
 import org.apache.flink.table.util.TableTestBase
+
 import org.junit.Assert.{assertTrue, fail}
-import org.junit.{Before, Ignore, Test}
+import org.junit.{Before, Test}
 
 class LookupJoinTest extends TableTestBase {
   private val testUtil = batchTestUtil()
@@ -54,15 +55,6 @@ class LookupJoinTest extends TableTestBase {
       classOf[TableException]
     )
 
-    // can't on non-key fields
-    expectExceptionThrown(
-      "SELECT * FROM MyTable AS T JOIN temporalTest " +
-        "FOR SYSTEM_TIME AS OF T.proctime AS D ON T.a = D.age",
-      "Temporal table join requires an equality condition on ALL fields of table " +
-        "[TestTemporalTable(id, name, age)]'s PRIMARY KEY or (UNIQUE) INDEX(s).",
-      classOf[TableException]
-    )
-
     // only support left or inner join
     expectExceptionThrown(
       "SELECT * FROM MyTable AS T RIGHT JOIN temporalTest " +
@@ -75,8 +67,8 @@ class LookupJoinTest extends TableTestBase {
     expectExceptionThrown(
       "SELECT * FROM MyTable AS T LEFT JOIN temporalTest " +
         "FOR SYSTEM_TIME AS OF T.proctime AS D ON T.a + 1 = D.id + 1",
-      "Temporal table join requires an equality condition on ALL fields of table " +
-        "[TestTemporalTable(id, name, age)]'s PRIMARY KEY or (UNIQUE) INDEX(s).",
+      "Temporal table join requires an equality condition on fields of table " +
+        "[TestTemporalTable(id, name, age)].",
       classOf[TableException]
     )
   }
@@ -120,6 +112,9 @@ class LookupJoinTest extends TableTestBase {
     val calciteConfig = CalciteConfig.createBuilder(testUtil.tableEnv.getConfig.getCalciteConfig)
       .replaceBatchProgram(programs).build()
     testUtil.tableEnv.getConfig.setCalciteConfig(calciteConfig)
+
+    thrown.expect(classOf[TableException])
+    thrown.expectMessage("VARCHAR(2147483647) and INTEGER does not have common type now")
 
     testUtil.verifyPlan("SELECT * FROM MyTable AS T JOIN temporalTest "
       + "FOR SYSTEM_TIME AS OF T.proctime AS D ON T.b = D.id")
@@ -248,8 +243,7 @@ class LookupJoinTest extends TableTestBase {
   private def expectExceptionThrown(
     sql: String,
     keywords: String,
-    clazz: Class[_ <: Throwable] = classOf[ValidationException])
-  : Unit = {
+    clazz: Class[_ <: Throwable] = classOf[ValidationException]): Unit = {
     try {
       testUtil.verifyExplain(sql)
       fail(s"Expected a $clazz, but no exception is thrown.")

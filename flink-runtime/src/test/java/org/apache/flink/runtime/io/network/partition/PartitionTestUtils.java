@@ -18,9 +18,19 @@
 
 package org.apache.flink.runtime.io.network.partition;
 
-import org.apache.flink.api.common.JobID;
-import org.apache.flink.runtime.io.disk.iomanager.NoOpIOManager;
-import org.apache.flink.runtime.taskmanager.NoOpTaskActions;
+import org.apache.flink.runtime.deployment.ResultPartitionDeploymentDescriptor;
+import org.apache.flink.runtime.io.network.NettyShuffleEnvironment;
+import org.apache.flink.runtime.jobgraph.IntermediateDataSetID;
+import org.apache.flink.runtime.shuffle.PartitionDescriptor;
+import org.apache.flink.runtime.shuffle.ShuffleDescriptor;
+import org.apache.flink.runtime.util.NettyShuffleDescriptorBuilder;
+
+import org.hamcrest.Matchers;
+
+import java.io.IOException;
+
+import static org.junit.Assert.assertThat;
+import static org.junit.Assert.fail;
 
 /**
  * This class should consolidate all mocking logic for ResultPartitions.
@@ -34,41 +44,61 @@ public class PartitionTestUtils {
 	}
 
 	public static ResultPartition createPartition(ResultPartitionType type) {
-		return createPartition(
-				new NoOpResultPartitionConsumableNotifier(),
-				type,
-				false);
-	}
-
-	public static ResultPartition createPartition(ResultPartitionType type, int numChannels) {
-		return createPartition(new NoOpResultPartitionConsumableNotifier(), type, numChannels, false);
+		return new ResultPartitionBuilder().setResultPartitionType(type).build();
 	}
 
 	public static ResultPartition createPartition(
-			ResultPartitionConsumableNotifier notifier,
-			ResultPartitionType type,
-			boolean sendScheduleOrUpdateConsumersMessage) {
-
-		return createPartition(notifier, type, 1, sendScheduleOrUpdateConsumersMessage);
+			NettyShuffleEnvironment environment,
+			ResultPartitionType partitionType,
+			int numChannels) {
+		return new ResultPartitionBuilder()
+			.setupBufferPoolFactoryFromNettyShuffleEnvironment(environment)
+			.setResultPartitionType(partitionType)
+			.setNumberOfSubpartitions(numChannels)
+			.build();
 	}
 
-	public static ResultPartition createPartition(
-			ResultPartitionConsumableNotifier notifier,
-			ResultPartitionType type,
-			int numChannels,
-			boolean sendScheduleOrUpdateConsumersMessage) {
+	static void verifyCreateSubpartitionViewThrowsException(
+			ResultPartitionManager partitionManager,
+			ResultPartitionID partitionId) throws IOException {
+		try {
+			partitionManager.createSubpartitionView(partitionId, 0, new NoOpBufferAvailablityListener());
 
-		return new ResultPartition(
-				"TestTask",
-				new NoOpTaskActions(),
-				new JobID(),
-				new ResultPartitionID(),
-				type,
-				numChannels,
-				numChannels,
-				new ResultPartitionManager(),
-				notifier,
-				new NoOpIOManager(),
-				sendScheduleOrUpdateConsumersMessage);
+			fail("Should throw a PartitionNotFoundException.");
+		} catch (PartitionNotFoundException notFound) {
+			assertThat(partitionId, Matchers.is(notFound.getPartitionId()));
+		}
+	}
+
+	public static ResultPartitionDeploymentDescriptor createPartitionDeploymentDescriptor(ResultPartitionType partitionType) {
+		ShuffleDescriptor shuffleDescriptor = NettyShuffleDescriptorBuilder.newBuilder().setBlocking(partitionType.isBlocking()).buildLocal();
+		PartitionDescriptor partitionDescriptor = new PartitionDescriptor(
+			new IntermediateDataSetID(),
+			shuffleDescriptor.getResultPartitionID().getPartitionId(),
+			partitionType,
+			1,
+			0);
+		return new ResultPartitionDeploymentDescriptor(
+			partitionDescriptor,
+			shuffleDescriptor,
+			1,
+			true);
+	}
+
+	public static ResultPartitionDeploymentDescriptor createPartitionDeploymentDescriptor(ShuffleDescriptor.ReleaseType releaseType) {
+		// set partition to blocking to support all release types
+		ShuffleDescriptor shuffleDescriptor = NettyShuffleDescriptorBuilder.newBuilder().setBlocking(true).buildLocal();
+		PartitionDescriptor partitionDescriptor = new PartitionDescriptor(
+			new IntermediateDataSetID(),
+			shuffleDescriptor.getResultPartitionID().getPartitionId(),
+			ResultPartitionType.BLOCKING,
+			1,
+			0);
+		return new ResultPartitionDeploymentDescriptor(
+			partitionDescriptor,
+			shuffleDescriptor,
+			1,
+			true,
+			releaseType);
 	}
 }

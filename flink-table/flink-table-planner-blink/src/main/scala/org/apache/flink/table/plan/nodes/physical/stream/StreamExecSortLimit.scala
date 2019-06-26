@@ -145,7 +145,7 @@ class StreamExecSortLimit(
       tableConfig,
       "StreamExecSortComparator",
       sortFields.indices.toArray,
-      sortKeyType.getInternalTypes,
+      sortKeyType.getLogicalTypes,
       sortDirections,
       nullsIsLast)
     val generateRetraction = StreamExecRetractionRules.isAccRetract(this)
@@ -190,7 +190,7 @@ class StreamExecSortLimit(
 
       // TODO Use UnaryUpdateTopNFunction after SortedMapState is merged
       case RetractStrategy =>
-        val equaliserCodeGen = new EqualiserCodeGenerator(inputRowTypeInfo.getInternalTypes)
+        val equaliserCodeGen = new EqualiserCodeGenerator(inputRowTypeInfo.getLogicalTypes)
         val generatedEqualiser = equaliserCodeGen.generateRecordEqualiser("RankValueEqualiser")
         new RetractableTopNFunction(
           minIdleStateRetentionTime,
@@ -207,16 +207,19 @@ class StreamExecSortLimit(
     val operator = new KeyedProcessOperator(processFunction)
     processFunction.setKeyContext(operator)
 
-    val outputRowTypeInfo = FlinkTypeFactory.toInternalRowType(getRowType).toTypeInfo
+    val outputRowTypeInfo = BaseRowTypeInfo.of(
+      FlinkTypeFactory.toLogicalRowType(getRowType))
 
-    // sets parallelism to 1 since StreamExecSortLimit could only work in global mode.
     val ret = new OneInputTransformation(
       inputTransform,
       getOperatorName,
       operator,
       outputRowTypeInfo,
-      1)
-    ret.setMaxParallelism(1)
+      getResource.getParallelism)
+
+    if (getResource.getMaxParallelism > 0) {
+      ret.setMaxParallelism(getResource.getMaxParallelism)
+    }
 
     val selector = NullBinaryRowKeySelector.INSTANCE
     ret.setStateKeySelector(selector)

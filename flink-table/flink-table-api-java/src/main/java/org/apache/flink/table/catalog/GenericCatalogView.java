@@ -19,6 +19,7 @@
 package org.apache.flink.table.catalog;
 
 import org.apache.flink.table.api.TableSchema;
+import org.apache.flink.table.catalog.config.CatalogConfig;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -27,76 +28,28 @@ import java.util.Optional;
 /**
  * A generic catalog view implementation.
  */
-public class GenericCatalogView implements CatalogView {
-	// Original text of the view definition.
-	private final String originalQuery;
-
-	// Expanded text of the original view definition
-	// This is needed because the context such as current DB is
-	// lost after the session, in which view is defined, is gone.
-	// Expanded query text takes care of the this, as an example.
-	private final String expandedQuery;
-
-	private final TableSchema schema;
-	private final Map<String, String> properties;
-	private String comment = "This is a generic catalog view";
+public class GenericCatalogView extends AbstractCatalogView {
 
 	public GenericCatalogView(String originalQuery, String expandedQuery, TableSchema schema,
 		Map<String, String> properties, String comment) {
-		this(originalQuery, expandedQuery, schema, properties);
-		this.comment = comment;
-	}
-
-	public GenericCatalogView(String originalQuery, String expandedQuery, TableSchema schema,
-		Map<String, String> properties) {
-		this.originalQuery = originalQuery;
-		this.expandedQuery = expandedQuery;
-		this.schema = schema;
-		this.properties = properties;
-	}
-
-	@Override
-	public String getOriginalQuery() {
-		return this.originalQuery;
-	}
-
-	@Override
-	public String getExpandedQuery() {
-		return this.expandedQuery;
-	}
-
-	@Override
-	public Map<String, String> getProperties() {
-		return properties;
-	}
-
-	@Override
-	public TableSchema getSchema() {
-		return schema;
+		super(originalQuery, expandedQuery, schema, properties, comment);
+		properties.put(CatalogConfig.IS_GENERIC, String.valueOf(true));
 	}
 
 	@Override
 	public GenericCatalogView copy() {
-		return new GenericCatalogView(this.originalQuery, this.expandedQuery, schema.copy(),
-			new HashMap<>(this.properties), comment);
+		return new GenericCatalogView(getOriginalQuery(), getExpandedQuery(), getSchema().copy(),
+			new HashMap<>(getProperties()), getComment());
 	}
 
 	@Override
 	public Optional<String> getDescription() {
-		return Optional.of(comment);
+		return Optional.of(getComment());
 	}
 
 	@Override
 	public Optional<String> getDetailedDescription() {
 		return Optional.of("This is a catalog view in an im-memory catalog");
-	}
-
-	public String getComment() {
-		return this.comment;
-	}
-
-	public void setComment(String comment) {
-		this.comment = comment;
 	}
 
 }

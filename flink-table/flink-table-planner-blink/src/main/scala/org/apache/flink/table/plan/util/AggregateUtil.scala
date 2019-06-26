@@ -17,16 +17,16 @@
  */
 package org.apache.flink.table.plan.util
 
-import org.apache.flink.api.common.typeinfo.{TypeInformation, Types}
-import org.apache.flink.table.`type`.InternalTypes._
-import org.apache.flink.table.`type`.{DecimalType, InternalType, InternalTypes, RowType, TypeConverters}
-import org.apache.flink.table.api.{TableConfig, TableConfigOptions, TableException}
+import org.apache.flink.api.common.typeinfo.Types
+import org.apache.flink.table.JLong
+import org.apache.flink.table.api.{DataTypes, TableConfig, TableConfigOptions, TableException}
 import org.apache.flink.table.calcite.FlinkRelBuilder.NamedWindowProperty
 import org.apache.flink.table.calcite.{FlinkTypeFactory, FlinkTypeSystem}
 import org.apache.flink.table.dataformat.BaseRow
 import org.apache.flink.table.dataview.DataViewUtils.useNullSerializerForStateViewFieldsFromAccType
 import org.apache.flink.table.dataview.{DataViewSpec, MapViewSpec}
-import org.apache.flink.table.expressions.{FieldReferenceExpression, ProctimeAttribute, RexNodeConverter, RowtimeAttribute, WindowEnd, WindowStart}
+import org.apache.flink.table.expressions.ExpressionUtils.extractValue
+import org.apache.flink.table.expressions._
 import org.apache.flink.table.functions.aggfunctions.DeclarativeAggregateFunction
 import org.apache.flink.table.functions.sql.{FlinkSqlOperatorTable, SqlConcatAggFunction, SqlFirstLastValueAggFunction}
 import org.apache.flink.table.functions.utils.AggSqlFunction
@@ -34,7 +34,15 @@ import org.apache.flink.table.functions.utils.UserDefinedFunctionUtils._
 import org.apache.flink.table.functions.{AggregateFunction, UserDefinedFunction}
 import org.apache.flink.table.plan.`trait`.RelModifiedMonotonicity
 import org.apache.flink.table.runtime.bundle.trigger.CountBundleTrigger
-import org.apache.flink.table.typeutils.{BinaryStringTypeInfo, DecimalTypeInfo, MapViewTypeInfo, TimeIndicatorTypeInfo, TimeIntervalTypeInfo}
+import org.apache.flink.table.types.DataType
+import org.apache.flink.table.types.LogicalTypeDataTypeConverter.{fromDataTypeToLogicalType, fromLogicalTypeToDataType}
+import org.apache.flink.table.types.TypeInfoDataTypeConverter.fromDataTypeToTypeInfo
+import org.apache.flink.table.types.logical.LogicalTypeRoot._
+import org.apache.flink.table.types.logical.utils.LogicalTypeChecks
+import org.apache.flink.table.types.logical.utils.LogicalTypeChecks.hasRoot
+import org.apache.flink.table.types.logical.{LogicalTypeRoot, _}
+import org.apache.flink.table.types.utils.TypeConversions.fromLegacyInfoToDataType
+import org.apache.flink.table.typeutils.{BinaryStringTypeInfo, MapViewTypeInfo}
 
 import org.apache.calcite.rel.`type`._
 import org.apache.calcite.rel.core.{Aggregate, AggregateCall}
@@ -44,6 +52,8 @@ import org.apache.calcite.sql.validate.SqlMonotonicity
 import org.apache.calcite.sql.{SqlKind, SqlRankFunction}
 import org.apache.calcite.tools.RelBuilder
 
+import java.lang.{Long => JLong}
+import java.time.Duration
 import java.util
 
 import scala.collection.JavaConversions._
@@ -166,7 +176,7 @@ object AggregateUtil extends Enumeration {
       aggregateCalls: Seq[AggregateCall],
       inputRowType: RelDataType,
       orderKeyIdx: Array[Int] = null)
-  : (Array[Array[Int]], Array[Array[TypeInformation[_]]], Array[UserDefinedFunction]) = {
+  : (Array[Array[Int]], Array[Array[DataType]], Array[UserDefinedFunction]) = {
 
     val aggInfos = transformToAggregateInfoList(
       aggregateCalls,
@@ -273,10 +283,10 @@ object AggregateUtil extends Enumeration {
       val function = factory.createAggFunction(call, index)
       val (externalAccTypes, viewSpecs, externalResultType) = function match {
         case a: DeclarativeAggregateFunction =>
-          val bufferTypes: Array[InternalType] = a.getAggBufferTypes
-          val bufferTypeInfos = bufferTypes.map(
-            TypeConverters.createExternalTypeInfoFromInternalType)
-          (bufferTypeInfos, Array.empty[DataViewSpec], a.getResultType)
+          val bufferTypes: Array[LogicalType] = a.getAggBufferTypes.map(_.getLogicalType)
+          val bufferTypeInfos = bufferTypes.map(fromLogicalTypeToDataType)
+          (bufferTypeInfos, Array.empty[DataViewSpec],
+              fromLogicalTypeToDataType(a.getResultType.getLogicalType))
         case a: AggregateFunction[_, _] =>
           val (implicitAccType, implicitResultType) = call.getAggregation match {
             case aggSqlFun: AggSqlFunction =>
@@ -299,7 +309,7 @@ object AggregateUtil extends Enumeration {
         function,
         index,
         argIndexes,
-        externalAccTypes.asInstanceOf[Array[TypeInformation[_]]],
+        externalAccTypes,
         viewSpecs,
         externalResultType,
         needRetraction(index))
@@ -350,7 +360,7 @@ object AggregateUtil extends Enumeration {
         false,
         new util.ArrayList[Integer](),
         -1,
-        typeFactory.createTypeFromInternalType(InternalTypes.LONG, isNullable = false),
+        typeFactory.createFieldTypeFromLogicalType(new BigIntType()),
         "_$count1$_")
 
       indexOfCountStar = Some(aggregateCalls.length)
@@ -389,10 +399,10 @@ object AggregateUtil extends Enumeration {
 
       // extract distinct information and replace a new call
       if (call.isDistinct && !call.isApproximate && argIndexes.length > 0) {
-        val argTypes: Array[InternalType] = call
+        val argTypes: Array[LogicalType] = call
           .getArgList
-          .map(inputType.getFieldList.get(_).getType) // RelDataType
-          .map(FlinkTypeFactory.toInternalType) // InternalType
+          .map(inputType.getFieldList.get(_).getType)
+          .map(FlinkTypeFactory.toLogicalType)
           .toArray
 
         val keyType = createDistinctKeyType(argTypes)
@@ -442,11 +452,13 @@ object AggregateUtil extends Enumeration {
 
       val accTypeInfo = new MapViewTypeInfo(
         // distinct is internal code gen, use internal type serializer.
-        d.keyType,
+        fromDataTypeToTypeInfo(d.keyType),
         valueType,
         isStateBackedDataViews,
         // the mapview serializer should handle null keys
         true)
+
+      val accDataType = fromLegacyInfoToDataType(accTypeInfo)
 
       val distinctMapViewSpec = if (isStateBackedDataViews) {
         Some(MapViewSpec(
@@ -460,7 +472,7 @@ object AggregateUtil extends Enumeration {
       DistinctInfo(
         d.argIndexes,
         d.keyType,
-        accTypeInfo,
+        accDataType,
         excludeAcc = false,
         distinctMapViewSpec,
         consumeRetraction,
@@ -471,26 +483,34 @@ object AggregateUtil extends Enumeration {
     (distinctInfos.toArray, newAggCalls)
   }
 
-  def createDistinctKeyType(argTypes: Array[InternalType]): TypeInformation[_] = {
+  def createDistinctKeyType(argTypes: Array[LogicalType]): DataType = {
     if (argTypes.length == 1) {
-      argTypes(0) match {
-        case BYTE => Types.BYTE
-        case SHORT => Types.SHORT
-        case INT => Types.INT
-        case LONG => Types.LONG
-        case FLOAT => Types.FLOAT
-        case DOUBLE => Types.DOUBLE
-        case BOOLEAN => Types.BOOLEAN
-        case DATE | TIME => Types.INT
-        case TIMESTAMP => Types.LONG
-        case STRING => BinaryStringTypeInfo.INSTANCE
-        case d: DecimalType => DecimalTypeInfo.of(d.precision(), d.scale())
-        case t =>
-          throw new TableException(s"Distinct aggregate function does not support type: $t.\n" +
-            s"Please re-check the data type.")
+      argTypes(0).getTypeRoot match {
+      case INTEGER => DataTypes.INT
+      case BIGINT => DataTypes.BIGINT
+      case SMALLINT => DataTypes.SMALLINT
+      case TINYINT => DataTypes.TINYINT
+      case FLOAT => DataTypes.FLOAT
+      case DOUBLE => DataTypes.DOUBLE
+      case BOOLEAN => DataTypes.BOOLEAN
+
+      case DATE => DataTypes.INT
+      case TIME_WITHOUT_TIME_ZONE => DataTypes.INT
+      case TIMESTAMP_WITHOUT_TIME_ZONE => DataTypes.BIGINT
+
+      case INTERVAL_YEAR_MONTH => DataTypes.INT
+      case INTERVAL_DAY_TIME => DataTypes.BIGINT
+
+      case VARCHAR | CHAR => fromLegacyInfoToDataType(BinaryStringTypeInfo.INSTANCE)
+      case DECIMAL =>
+        val dt = argTypes(0).asInstanceOf[DecimalType]
+        DataTypes.DECIMAL(dt.getPrecision, dt.getScale)
+      case t =>
+        throw new TableException(s"Distinct aggregate function does not support type: $t.\n" +
+          s"Please re-check the data type.")
       }
     } else {
-      TypeConverters.createExternalTypeInfoFromInternalType(new RowType(argTypes: _*))
+      fromLogicalTypeToDataType(RowType.of(argTypes: _*)).bridgedTo(classOf[BaseRow])
     }
   }
 
@@ -537,13 +557,13 @@ object AggregateUtil extends Enumeration {
     val accTypes = aggInfoList.getAccTypes
     val groupingTypes = groupSet
       .map(inputType.getFieldList.get(_).getType)
-      .map(FlinkTypeFactory.toInternalType)
+      .map(FlinkTypeFactory.toLogicalType)
     val groupingNames = groupSet.map(inputType.getFieldNames.get(_))
     val accFieldNames = inferStreamAggAccumulatorNames(aggInfoList)
 
-    typeFactory.buildRelDataType(
+    typeFactory.buildRelNodeRowType(
       groupingNames ++ accFieldNames,
-      groupingTypes ++ accTypes.map(TypeConverters.createInternalTypeFromTypeInfo))
+      groupingTypes ++ accTypes.map(fromDataTypeToLogicalType))
   }
 
   /**
@@ -614,13 +634,13 @@ object AggregateUtil extends Enumeration {
     val accTypes = aggInfoList.getAccTypes
     val groupingTypes = groupSet
       .map(inputRowType.getFieldList.get(_).getType)
-      .map(FlinkTypeFactory.toInternalType)
+      .map(FlinkTypeFactory.toLogicalType)
     val groupingNames = groupSet.map(inputRowType.getFieldNames.get(_))
     val accFieldNames = inferAggAccumulatorNames(aggInfoList)
 
-    typeFactory.buildRelDataType(
+    typeFactory.buildRelNodeRowType(
       groupingNames ++ accFieldNames,
-      groupingTypes ++ accTypes.map(TypeConverters.createInternalTypeFromTypeInfo))
+      groupingTypes ++ accTypes.map(fromDataTypeToLogicalType))
   }
 
   /**
@@ -697,15 +717,25 @@ object AggregateUtil extends Enumeration {
     (propPos._1, propPos._2, propPos._3)
   }
 
-  def isRowtimeIndicatorType(fieldType: TypeInformation[_]): Boolean = {
-    TimeIndicatorTypeInfo.ROWTIME_INDICATOR == fieldType
+  def isRowtimeAttribute(field: FieldReferenceExpression): Boolean = {
+    LogicalTypeChecks.isRowtimeAttribute(field.getOutputDataType.getLogicalType)
   }
 
-  def isProctimeIndicatorType(fieldType: TypeInformation[_]): Boolean = {
-    TimeIndicatorTypeInfo.PROCTIME_INDICATOR == fieldType
+  def isProctimeAttribute(field: FieldReferenceExpression): Boolean = {
+    LogicalTypeChecks.isProctimeAttribute(field.getOutputDataType.getLogicalType)
   }
 
-  def isTimeIntervalType(intervalType: TypeInformation[_]): Boolean = {
-    intervalType == TimeIntervalTypeInfo.INTERVAL_MILLIS
+  def hasTimeIntervalType(intervalType: ValueLiteralExpression): Boolean = {
+    hasRoot(intervalType.getOutputDataType.getLogicalType, LogicalTypeRoot.INTERVAL_DAY_TIME)
   }
+
+  def hasRowIntervalType(intervalType: ValueLiteralExpression): Boolean = {
+    hasRoot(intervalType.getOutputDataType.getLogicalType, LogicalTypeRoot.BIGINT)
+  }
+
+  def toLong(literalExpr: ValueLiteralExpression): JLong =
+    extractValue(literalExpr, classOf[JLong]).get()
+
+  def toDuration(literalExpr: ValueLiteralExpression): Duration =
+    extractValue(literalExpr, classOf[Duration]).get()
 }

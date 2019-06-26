@@ -22,15 +22,18 @@ import org.apache.flink.streaming.api.datastream.DataStream
 import org.apache.flink.streaming.api.transformations.{OneInputTransformation, StreamTransformation}
 import org.apache.flink.table.api.{StreamTableEnvironment, Table, TableException}
 import org.apache.flink.table.calcite.FlinkTypeFactory
-import org.apache.flink.table.codegen.{CodeGenUtils, CodeGeneratorContext}
 import org.apache.flink.table.codegen.SinkCodeGenerator.{extractTableSinkTypeClass, generateRowConverterOperator}
+import org.apache.flink.table.codegen.{CodeGenUtils, CodeGeneratorContext}
 import org.apache.flink.table.dataformat.BaseRow
+import org.apache.flink.table.plan.`trait`.{AccMode, AccModeTraitDef}
 import org.apache.flink.table.plan.nodes.calcite.Sink
 import org.apache.flink.table.plan.nodes.exec.{ExecNode, StreamExecNode}
-import org.apache.flink.table.plan.`trait`.{AccMode, AccModeTraitDef}
+import org.apache.flink.table.plan.nodes.resource.NodeResourceConfig
 import org.apache.flink.table.plan.util.UpdatingPlanChecker
 import org.apache.flink.table.sinks._
-import org.apache.flink.table.typeutils.BaseRowTypeInfo
+import org.apache.flink.table.types.logical.TimestampType
+import org.apache.flink.table.types.utils.TypeConversions.fromDataTypeToLegacyInfo
+import org.apache.flink.table.typeutils.{BaseRowTypeInfo, TypeCheckUtils}
 
 import org.apache.calcite.plan.{RelOptCluster, RelTraitSet}
 import org.apache.calcite.rel.RelNode
@@ -113,17 +116,44 @@ class StreamExecSink[T](
                 "RetractStreamTableSink, or UpsertStreamTableSink.")
         }
         val dataStream = new DataStream(tableEnv.execEnv, transformation)
-        streamTableSink.emitDataStream(dataStream).getTransformation
+        val dsSink = streamTableSink.consumeDataStream(dataStream)
+        if (dsSink == null) {
+          throw new TableException("The StreamTableSink#consumeDataStream(DataStream) must be " +
+            "implemented and return the sink transformation DataStreamSink. " +
+            s"However, ${sink.getClass.getCanonicalName} doesn't implement this method.")
+        }
+        val configSinkParallelism = NodeResourceConfig.getSinkParallelism(
+          tableEnv.getConfig.getConf)
 
-      case streamTableSink: DataStreamTableSink[_] =>
+        val maxSinkParallelism = dsSink.getTransformation.getMaxParallelism
+
+        // only set user's parallelism when user defines a sink parallelism
+        if (configSinkParallelism > 0) {
+          // set the parallelism when user's parallelism is not larger than max parallelism or
+          // max parallelism is not set
+          if (maxSinkParallelism < 0 || configSinkParallelism <= maxSinkParallelism) {
+            dsSink.getTransformation.setParallelism(configSinkParallelism)
+          }
+        }
+        if (!UpdatingPlanChecker.isAppendOnly(this) &&
+            dsSink.getTransformation.getParallelism != transformation.getParallelism) {
+          throw new TableException(s"The configured sink parallelism should be equal to the" +
+              " input node when input is an update stream. The input parallelism is " +
+              "${transformation.getParallelism}, however the configured sink parallelism is " +
+              "${dsSink.getTransformation.getParallelism}.")
+        }
+        dsSink.getTransformation
+
+      case dsTableSink: DataStreamTableSink[_] =>
         // In case of table to stream through BatchTableEnvironment#translateToDataStream,
         // we insert a DataStreamTableSink then wrap it as a LogicalSink, there is no real batch
         // table sink, so we do not need to invoke TableSink#emitBoundedStream and set resource,
         // just a translation to StreamTransformation is ok.
-        translateToStreamTransformation(streamTableSink.withChangeFlag, tableEnv)
+        translateToStreamTransformation(dsTableSink.withChangeFlag, tableEnv)
 
       case _ =>
-        throw new TableException("Only Support StreamTableSink or DataStreamTableSink!")
+        throw new TableException(s"Only Support StreamTableSink! " +
+          s"However ${sink.getClass.getCanonicalName} is not a StreamTableSink.")
     }
     resultTransformation.asInstanceOf[StreamTransformation[Any]]
   }
@@ -158,22 +188,35 @@ class StreamExecSink[T](
     val rowtimeFields = logicalType.getFieldList
                         .filter(f => FlinkTypeFactory.isRowtimeIndicatorType(f.getType))
 
-    if (rowtimeFields.size > 1) {
+    val convType = if (rowtimeFields.size > 1) {
       throw new TableException(
         s"Found more than one rowtime field: [${rowtimeFields.map(_.getName).mkString(", ")}] in " +
           s"the table that should be converted to a DataStream.\n" +
           s"Please select the rowtime field that should be used as event-time timestamp for the " +
           s"DataStream by casting all other fields to TIMESTAMP.")
+    } else if (rowtimeFields.size == 1) {
+      val origRowType = parTransformation.getOutputType.asInstanceOf[BaseRowTypeInfo]
+      val convFieldTypes = origRowType.getLogicalTypes.map { t =>
+        if (TypeCheckUtils.isRowTime(t)) {
+          new TimestampType(3)
+        } else {
+          t
+        }
+      }
+      new BaseRowTypeInfo(convFieldTypes, origRowType.getFieldNames)
+    } else {
+      parTransformation.getOutputType
     }
-    val resultType = sink.getOutputType
+    val resultDataType = sink.getConsumedDataType
+    val resultType = fromDataTypeToLegacyInfo(resultDataType)
     val typeClass = extractTableSinkTypeClass(sink)
-    if (CodeGenUtils.isInternalClass(typeClass, resultType)) {
+    if (CodeGenUtils.isInternalClass(typeClass, resultDataType)) {
       parTransformation.asInstanceOf[StreamTransformation[T]]
     } else {
       val (converterOperator, outputTypeInfo) = generateRowConverterOperator[T](
         CodeGeneratorContext(tableEnv.getConfig),
         tableEnv.getConfig,
-        parTransformation.getOutputType.asInstanceOf[BaseRowTypeInfo],
+        convType.asInstanceOf[BaseRowTypeInfo],
         "SinkConversion",
         None,
         withChangeFlag,

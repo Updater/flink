@@ -20,8 +20,6 @@ package org.apache.flink.table.plan.nodes.physical.stream
 
 import org.apache.flink.streaming.api.datastream.DataStream
 import org.apache.flink.streaming.api.transformations.StreamTransformation
-import org.apache.flink.table.`type`.TypeConverters.createInternalTypeFromTypeInfo
-import org.apache.flink.table.`type`.{InternalTypes, RowType}
 import org.apache.flink.table.api.StreamTableEnvironment
 import org.apache.flink.table.calcite.FlinkRelBuilder
 import org.apache.flink.table.codegen.CodeGeneratorContext
@@ -32,7 +30,10 @@ import org.apache.flink.table.plan.nodes.exec.{ExecNode, StreamExecNode}
 import org.apache.flink.table.plan.schema.DataStreamTable
 import org.apache.flink.table.plan.util.ScanUtil
 import org.apache.flink.table.runtime.AbstractProcessStreamOperator
-import org.apache.flink.table.typeutils.TimeIndicatorTypeInfo.{ROWTIME_INDICATOR, ROWTIME_STREAM_MARKER}
+import org.apache.flink.table.types.LogicalTypeDataTypeConverter.fromDataTypeToLogicalType
+import org.apache.flink.table.types.logical.{RowType, TimestampKind, TimestampType}
+import org.apache.flink.table.typeutils.TimeIndicatorTypeInfo.ROWTIME_STREAM_MARKER
+import org.apache.flink.table.typeutils.TypeCheckUtils
 
 import org.apache.calcite.plan._
 import org.apache.calcite.rel.`type`.RelDataType
@@ -76,6 +77,9 @@ class StreamExecDataStreamScan(
 
   override def deriveRowType(): RelDataType = outputRowType
 
+  def getSourceTransformation: StreamTransformation[_] =
+    dataStreamTable.dataStream.getTransformation
+
   override def copy(traitSet: RelTraitSet, inputs: java.util.List[RelNode]): RelNode = {
     new StreamExecDataStreamScan(cluster, traitSet, getTable, getRowType)
   }
@@ -106,13 +110,15 @@ class StreamExecDataStreamScan(
     val config = tableEnv.getConfig
     val inputDataStream: DataStream[Any] = dataStreamTable.dataStream
     val transform = inputDataStream.getTransformation
+    transform.setParallelism(getResource.getParallelism)
 
     val rowtimeExpr = getRowtimeExpression(tableEnv.getRelBuilder)
 
     // when there is row time extraction expression, we need internal conversion
     // when the physical type of the input date stream is not BaseRow, we need internal conversion.
     if (rowtimeExpr.isDefined || ScanUtil.needsConversion(
-      dataStreamTable.typeInfo, dataStreamTable.dataStream.getType.getTypeClass)) {
+      dataStreamTable.dataType,
+      dataStreamTable.dataStream.getType.getTypeClass)) {
 
       // extract time if the index is -1 or -2.
       val (extractElement, resetElement) =
@@ -123,17 +129,19 @@ class StreamExecDataStreamScan(
         }
       val ctx = CodeGeneratorContext(config).setOperatorBaseClass(
         classOf[AbstractProcessStreamOperator[BaseRow]])
-      ScanUtil.convertToInternalRow(
+      val ret = ScanUtil.convertToInternalRow(
         ctx,
         transform,
         dataStreamTable.fieldIndexes,
-        dataStreamTable.typeInfo,
+        dataStreamTable.dataType,
         getRowType,
         getTable.getQualifiedName,
         config,
         rowtimeExpr,
         beforeConvert = extractElement,
         afterConvert = resetElement)
+      ret.setParallelism(getResource.getParallelism)
+      ret
     } else {
       transform.asInstanceOf[StreamTransformation[BaseRow]]
     }
@@ -149,11 +157,10 @@ class StreamExecDataStreamScan(
         fieldIdxs.indexOf(ROWTIME_STREAM_MARKER))
 
       // get expression to extract timestamp
-      createInternalTypeFromTypeInfo(dataStreamTable.typeInfo) match {
+      fromDataTypeToLogicalType(dataStreamTable.dataType) match {
         case dataType: RowType
           if dataType.getFieldNames.contains(rowtimeField) &&
-              dataType.getTypeAt(
-                dataType.getFieldIndex(rowtimeField)).equals(ROWTIME_INDICATOR) =>
+              TypeCheckUtils.isRowTime(dataType.getTypeAt(dataType.getFieldIndex(rowtimeField))) =>
           // if rowtimeField already existed in the data stream, use the default rowtime
           None
         case _ =>
@@ -161,10 +168,9 @@ class StreamExecDataStreamScan(
           Some(
             relBuilder.cast(
               relBuilder.call(new StreamRecordTimestampSqlFunction),
-              relBuilder.getTypeFactory.createTypeFromInternalType(
-                InternalTypes.ROWTIME_INDICATOR, isNullable = true).getSqlTypeName))
+              relBuilder.getTypeFactory.createFieldTypeFromLogicalType(
+                new TimestampType(true, TimestampKind.ROWTIME, 3)).getSqlTypeName))
       }
     }
   }
-
 }

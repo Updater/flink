@@ -29,10 +29,11 @@ import org.apache.calcite.plan.hep.HepMatchOrder
   */
 object FlinkBatchProgram {
   val SUBQUERY_REWRITE = "subquery_rewrite"
-  val CORRELATE_REWRITE = "correlate_rewrite"
+  val TEMPORAL_JOIN_REWRITE = "temporal_join_rewrite"
   val DECORRELATE = "decorrelate"
   val DEFAULT_REWRITE = "default_rewrite"
   val PREDICATE_PUSHDOWN = "predicate_pushdown"
+  val JOIN_REWRITE = "join_rewrite"
   val WINDOW = "window"
   val LOGICAL = "logical"
   val LOGICAL_REWRITE = "logical_rewrite"
@@ -45,7 +46,7 @@ object FlinkBatchProgram {
        // rewrite sub-queries to joins
       SUBQUERY_REWRITE,
       FlinkGroupProgramBuilder.newBuilder[BatchOptimizeContext]
-        // rewrite RelTable before rewriting sub-queries
+        // rewrite QueryOperationCatalogViewTable before rewriting sub-queries
         .addProgram(FlinkHepRuleSetProgramBuilder.newBuilder
           .setHepRulesExecutionType(HEP_RULES_EXECUTION_TYPE.RULE_SEQUENCE)
           .setHepMatchOrder(HepMatchOrder.BOTTOM_UP)
@@ -71,8 +72,9 @@ object FlinkBatchProgram {
     )
 
     // rewrite special temporal join plan
+    // TODO remove this program after upgraded to CALCITE-1.20.0 (CALCITE-2004 is fixed)
     chainedProgram.addLast(
-      CORRELATE_REWRITE,
+      TEMPORAL_JOIN_REWRITE,
       FlinkGroupProgramBuilder.newBuilder[BatchOptimizeContext]
         .addProgram(
           FlinkHepRuleSetProgramBuilder.newBuilder
@@ -105,17 +107,41 @@ object FlinkBatchProgram {
       PREDICATE_PUSHDOWN,
       FlinkGroupProgramBuilder.newBuilder[BatchOptimizeContext]
         .addProgram(
+          FlinkGroupProgramBuilder.newBuilder[BatchOptimizeContext]
+            .addProgram(
+              FlinkHepRuleSetProgramBuilder.newBuilder
+                .setHepRulesExecutionType(HEP_RULES_EXECUTION_TYPE.RULE_SEQUENCE)
+                .setHepMatchOrder(HepMatchOrder.BOTTOM_UP)
+                .add(FlinkBatchRuleSets.JOIN_PREDICATE_REWRITE_RULES)
+                .build(), "join predicate rewrite")
+            .addProgram(
+              FlinkHepRuleSetProgramBuilder.newBuilder
+                .setHepRulesExecutionType(HEP_RULES_EXECUTION_TYPE.RULE_COLLECTION)
+                .setHepMatchOrder(HepMatchOrder.BOTTOM_UP)
+                .add(FlinkBatchRuleSets.FILTER_PREPARE_RULES)
+                .build(), "other predicate rewrite")
+            .setIterations(5).build())
+        .addProgram(
           FlinkHepRuleSetProgramBuilder.newBuilder
-            .setHepRulesExecutionType(HEP_RULES_EXECUTION_TYPE.RULE_COLLECTION)
+            .setHepRulesExecutionType(HEP_RULES_EXECUTION_TYPE.RULE_SEQUENCE)
             .setHepMatchOrder(HepMatchOrder.BOTTOM_UP)
-            .add(FlinkBatchRuleSets.FILTER_PREPARE_RULES)
-            .build(), "filter rules")
+            .add(FlinkBatchRuleSets.FILTER_TABLESCAN_PUSHDOWN_RULES)
+            .build(), "push predicate into table scan")
         .addProgram(
           FlinkHepRuleSetProgramBuilder.newBuilder
             .setHepRulesExecutionType(HEP_RULES_EXECUTION_TYPE.RULE_SEQUENCE)
             .setHepMatchOrder(HepMatchOrder.BOTTOM_UP)
             .add(FlinkBatchRuleSets.PRUNE_EMPTY_RULES)
             .build(), "prune empty after predicate push down")
+        .build())
+
+    // join rewrite
+    chainedProgram.addLast(
+      JOIN_REWRITE,
+      FlinkHepRuleSetProgramBuilder.newBuilder
+        .setHepRulesExecutionType(HEP_RULES_EXECUTION_TYPE.RULE_COLLECTION)
+        .setHepMatchOrder(HepMatchOrder.BOTTOM_UP)
+        .add(FlinkBatchRuleSets.JOIN_COND_EQUAL_TRANSFER_RULES)
         .build())
 
     // window rewrite

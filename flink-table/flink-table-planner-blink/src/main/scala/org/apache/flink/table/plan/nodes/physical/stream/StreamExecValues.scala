@@ -24,13 +24,12 @@ import org.apache.flink.table.codegen.ValuesCodeGenerator
 import org.apache.flink.table.dataformat.BaseRow
 import org.apache.flink.table.plan.nodes.exec.{ExecNode, StreamExecNode}
 
+import com.google.common.collect.ImmutableList
 import org.apache.calcite.plan._
-import org.apache.calcite.rel.core.Values
 import org.apache.calcite.rel.RelNode
 import org.apache.calcite.rel.`type`.RelDataType
+import org.apache.calcite.rel.core.Values
 import org.apache.calcite.rex.RexLiteral
-
-import com.google.common.collect.ImmutableList
 
 import java.util
 
@@ -83,7 +82,13 @@ class StreamExecValues(
         getRowType,
         tuples,
         getRelTypeName)
-      tableEnv.execEnv.createInput(inputFormat, inputFormat.getProducedType).getTransformation
+      val transformation = tableEnv.execEnv.createInput(inputFormat,
+        inputFormat.getProducedType).getTransformation
+      transformation.setParallelism(getResource.getParallelism)
+      if (getResource.getMaxParallelism > 0) {
+        transformation.setMaxParallelism(getResource.getMaxParallelism)
+      }
+      transformation
     } else {
       // enable this feature when runtime support do checkpoint when source finished
       throw new TableException("Values source input is not supported currently. Probably " +

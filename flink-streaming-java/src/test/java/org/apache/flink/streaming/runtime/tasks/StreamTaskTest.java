@@ -49,10 +49,8 @@ import org.apache.flink.runtime.executiongraph.JobInformation;
 import org.apache.flink.runtime.executiongraph.TaskInformation;
 import org.apache.flink.runtime.filecache.FileCache;
 import org.apache.flink.runtime.io.disk.iomanager.IOManager;
-import org.apache.flink.runtime.io.network.NetworkEnvironment;
-import org.apache.flink.runtime.io.network.NetworkEnvironmentBuilder;
+import org.apache.flink.runtime.io.network.NettyShuffleEnvironmentBuilder;
 import org.apache.flink.runtime.io.network.TaskEventDispatcher;
-import org.apache.flink.runtime.io.network.netty.PartitionProducerStateChecker;
 import org.apache.flink.runtime.io.network.partition.NoOpResultPartitionConsumableNotifier;
 import org.apache.flink.runtime.io.network.partition.ResultPartitionConsumableNotifier;
 import org.apache.flink.runtime.io.network.partition.ResultPartitionManager;
@@ -66,6 +64,7 @@ import org.apache.flink.runtime.operators.testutils.MockEnvironment;
 import org.apache.flink.runtime.operators.testutils.MockEnvironmentBuilder;
 import org.apache.flink.runtime.operators.testutils.MockInputSplitProvider;
 import org.apache.flink.runtime.query.KvStateRegistry;
+import org.apache.flink.runtime.shuffle.ShuffleEnvironment;
 import org.apache.flink.runtime.state.AbstractKeyedStateBackend;
 import org.apache.flink.runtime.state.AbstractStateBackend;
 import org.apache.flink.runtime.state.CheckpointStorage;
@@ -87,6 +86,7 @@ import org.apache.flink.runtime.state.TestTaskStateManager;
 import org.apache.flink.runtime.state.memory.MemoryBackendCheckpointStorage;
 import org.apache.flink.runtime.state.memory.MemoryStateBackend;
 import org.apache.flink.runtime.taskexecutor.KvStateService;
+import org.apache.flink.runtime.taskexecutor.PartitionProducerStateChecker;
 import org.apache.flink.runtime.taskexecutor.TestGlobalAggregateManager;
 import org.apache.flink.runtime.taskmanager.CheckpointResponder;
 import org.apache.flink.runtime.taskmanager.NoOpTaskManagerActions;
@@ -844,7 +844,9 @@ public class StreamTaskTest extends TestLogger {
 		protected void init() throws Exception {}
 
 		@Override
-		protected void run() throws Exception {}
+		protected void performDefaultAction(ActionContext context) throws Exception {
+			context.allActionsCompleted();
+		}
 
 		@Override
 		protected void cleanup() throws Exception {}
@@ -900,7 +902,7 @@ public class StreamTaskTest extends TestLogger {
 		PartitionProducerStateChecker partitionProducerStateChecker = mock(PartitionProducerStateChecker.class);
 		Executor executor = mock(Executor.class);
 
-		NetworkEnvironment network = new NetworkEnvironmentBuilder().build();
+		ShuffleEnvironment<?, ?> shuffleEnvironment = new NettyShuffleEnvironmentBuilder().build();
 
 		JobInformation jobInformation = new JobInformation(
 			new JobID(),
@@ -930,7 +932,7 @@ public class StreamTaskTest extends TestLogger {
 			0,
 			mock(MemoryManager.class),
 			mock(IOManager.class),
-			network,
+			shuffleEnvironment,
 			new KvStateService(new KvStateRegistry(), null, null),
 			mock(BroadcastVariableManager.class),
 			new TaskEventDispatcher(),
@@ -965,7 +967,8 @@ public class StreamTaskTest extends TestLogger {
 		@Override
 		public void run(Object lockingObject,
 						StreamStatusMaintainer streamStatusMaintainer,
-						Output<StreamRecord<Long>> collector) throws Exception {
+						Output<StreamRecord<Long>> collector,
+						OperatorChain<?, ?> operatorChain) throws Exception {
 			while (!canceled) {
 				try {
 					Thread.sleep(500);
@@ -1031,7 +1034,9 @@ public class StreamTaskTest extends TestLogger {
 		protected void init() throws Exception {}
 
 		@Override
-		protected void run() throws Exception {}
+		protected void performDefaultAction(ActionContext context) throws Exception {
+			context.allActionsCompleted();
+		}
 
 		@Override
 		protected void cleanup() throws Exception {}
@@ -1059,10 +1064,11 @@ public class StreamTaskTest extends TestLogger {
 		}
 
 		@Override
-		protected void run() throws Exception {
+		protected void performDefaultAction(ActionContext context) throws Exception {
 			if (fail) {
 				throw new RuntimeException();
 			}
+			context.allActionsCompleted();
 		}
 
 		@Override
@@ -1149,7 +1155,7 @@ public class StreamTaskTest extends TestLogger {
 		protected void init() {}
 
 		@Override
-		protected void run() throws Exception {
+		protected void performDefaultAction(ActionContext context) throws Exception {
 			holder = new LockHolder(getCheckpointLock(), latch);
 			holder.start();
 			latch.await();
@@ -1164,6 +1170,7 @@ public class StreamTaskTest extends TestLogger {
 				// restore interruption state
 				Thread.currentThread().interrupt();
 			}
+			context.allActionsCompleted();
 		}
 
 		@Override
@@ -1193,7 +1200,7 @@ public class StreamTaskTest extends TestLogger {
 		protected void init() {}
 
 		@Override
-		protected void run() throws Exception {
+		protected void performDefaultAction(ActionContext context) throws Exception {
 			final OneShotLatch latch = new OneShotLatch();
 			final Object lock = new Object();
 
@@ -1219,7 +1226,7 @@ public class StreamTaskTest extends TestLogger {
 			finally {
 				holder.close();
 			}
-
+			context.allActionsCompleted();
 		}
 
 		@Override
@@ -1259,8 +1266,9 @@ public class StreamTaskTest extends TestLogger {
 		}
 
 		@Override
-		protected void run() throws Exception {
+		protected void performDefaultAction(ActionContext context) throws Exception {
 			syncLatch.await();
+			context.allActionsCompleted();
 		}
 
 		@Override

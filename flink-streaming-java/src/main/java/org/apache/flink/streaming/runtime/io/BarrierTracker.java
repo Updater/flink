@@ -19,10 +19,11 @@
 package org.apache.flink.streaming.runtime.io;
 
 import org.apache.flink.annotation.Internal;
+import org.apache.flink.runtime.checkpoint.CheckpointException;
+import org.apache.flink.runtime.checkpoint.CheckpointFailureReason;
 import org.apache.flink.runtime.checkpoint.CheckpointMetaData;
 import org.apache.flink.runtime.checkpoint.CheckpointMetrics;
 import org.apache.flink.runtime.checkpoint.CheckpointOptions;
-import org.apache.flink.runtime.checkpoint.decline.CheckpointDeclineOnCancellationBarrierException;
 import org.apache.flink.runtime.io.network.api.CancelCheckpointMarker;
 import org.apache.flink.runtime.io.network.api.CheckpointBarrier;
 import org.apache.flink.runtime.io.network.partition.consumer.BufferOrEvent;
@@ -34,6 +35,7 @@ import org.slf4j.LoggerFactory;
 
 import java.util.ArrayDeque;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
 
 /**
  * The BarrierTracker keeps track of what checkpoint barriers have been received from
@@ -89,17 +91,27 @@ public class BarrierTracker implements CheckpointBarrierHandler {
 	}
 
 	@Override
-	public BufferOrEvent getNextNonBlocked() throws Exception {
+	public CompletableFuture<?> isAvailable() {
+		return inputGate.isAvailable();
+	}
+
+	@Override
+	public boolean isFinished() {
+		return inputGate.isFinished();
+	}
+
+	@Override
+	public Optional<BufferOrEvent> pollNext() throws Exception {
 		while (true) {
-			Optional<BufferOrEvent> next = inputGate.getNextBufferOrEvent();
+			Optional<BufferOrEvent> next = inputGate.pollNext();
 			if (!next.isPresent()) {
 				// buffer or input exhausted
-				return null;
+				return next;
 			}
 
 			BufferOrEvent bufferOrEvent = next.get();
 			if (bufferOrEvent.isBuffer()) {
-				return bufferOrEvent;
+				return next;
 			}
 			else if (bufferOrEvent.getEvent().getClass() == CheckpointBarrier.class) {
 				processBarrier((CheckpointBarrier) bufferOrEvent.getEvent(), bufferOrEvent.getChannelIndex());
@@ -109,7 +121,7 @@ public class BarrierTracker implements CheckpointBarrierHandler {
 			}
 			else {
 				// some other event
-				return bufferOrEvent;
+				return next;
 			}
 		}
 	}
@@ -138,6 +150,11 @@ public class BarrierTracker implements CheckpointBarrierHandler {
 	public long getAlignmentDurationNanos() {
 		// this one does not do alignment at all
 		return 0L;
+	}
+
+	@Override
+	public int getNumberOfInputChannels() {
+		return totalNumberOfInputChannels;
 	}
 
 	private void processBarrier(CheckpointBarrier receivedBarrier, int channelIndex) throws Exception {
@@ -274,7 +291,8 @@ public class BarrierTracker implements CheckpointBarrierHandler {
 	private void notifyAbort(long checkpointId) throws Exception {
 		if (toNotifyOnCheckpoint != null) {
 			toNotifyOnCheckpoint.abortCheckpointOnBarrier(
-					checkpointId, new CheckpointDeclineOnCancellationBarrierException());
+				checkpointId,
+				new CheckpointException(CheckpointFailureReason.CHECKPOINT_DECLINED_ON_CANCELLATION_BARRIER));
 		}
 	}
 

@@ -76,7 +76,7 @@ public class LocalStreamEnvironment extends StreamExecutionEnvironment {
 	}
 
 	/**
-	 * Executes the JobGraph of the on a mini cluster of CLusterUtil with a user
+	 * Executes the JobGraph of the on a mini cluster of ClusterUtil with a user
 	 * specified name.
 	 *
 	 * @param jobName
@@ -86,8 +86,7 @@ public class LocalStreamEnvironment extends StreamExecutionEnvironment {
 	@Override
 	public JobExecutionResult execute(String jobName) throws Exception {
 		// transform the streaming program into a JobGraph
-		StreamGraph streamGraph = getStreamGraph();
-		streamGraph.setJobName(jobName);
+		StreamGraph streamGraph = getStreamGraph(jobName);
 
 		JobGraph jobGraph = streamGraph.getJobGraph();
 		jobGraph.setAllowQueuedScheduling(true);

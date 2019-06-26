@@ -34,8 +34,8 @@ import org.apache.flink.runtime.blob.BlobWriter;
 import org.apache.flink.runtime.blob.PermanentBlobKey;
 import org.apache.flink.runtime.blob.VoidBlobWriter;
 import org.apache.flink.runtime.checkpoint.CheckpointCoordinator;
+import org.apache.flink.runtime.checkpoint.CheckpointFailureManager;
 import org.apache.flink.runtime.checkpoint.CheckpointIDCounter;
-import org.apache.flink.runtime.checkpoint.CheckpointRetentionPolicy;
 import org.apache.flink.runtime.checkpoint.CheckpointStatsSnapshot;
 import org.apache.flink.runtime.checkpoint.CheckpointStatsTracker;
 import org.apache.flink.runtime.checkpoint.CompletedCheckpointStore;
@@ -64,12 +64,15 @@ import org.apache.flink.runtime.jobmanager.scheduler.NoResourceAvailableExceptio
 import org.apache.flink.runtime.jobmaster.slotpool.Scheduler;
 import org.apache.flink.runtime.jobmaster.slotpool.SlotProvider;
 import org.apache.flink.runtime.query.KvStateLocationRegistry;
+import org.apache.flink.runtime.shuffle.NettyShuffleMaster;
+import org.apache.flink.runtime.shuffle.ShuffleMaster;
 import org.apache.flink.runtime.state.SharedStateRegistry;
 import org.apache.flink.runtime.state.StateBackend;
 import org.apache.flink.runtime.taskmanager.TaskExecutionState;
 import org.apache.flink.types.Either;
 import org.apache.flink.util.ExceptionUtils;
 import org.apache.flink.util.FlinkException;
+import org.apache.flink.util.FlinkRuntimeException;
 import org.apache.flink.util.OptionalFailure;
 import org.apache.flink.util.Preconditions;
 import org.apache.flink.util.SerializedThrowable;
@@ -108,7 +111,6 @@ import java.util.concurrent.atomic.AtomicLongFieldUpdater;
 import java.util.concurrent.atomic.AtomicReferenceFieldUpdater;
 import java.util.stream.Collectors;
 
-import static org.apache.flink.util.Preconditions.checkArgument;
 import static org.apache.flink.util.Preconditions.checkNotNull;
 import static org.apache.flink.util.Preconditions.checkState;
 
@@ -267,7 +269,7 @@ public class ExecutionGraph implements AccessExecutionGraph {
 	private volatile JobStatus state = JobStatus.CREATED;
 
 	/** A future that completes once the job has reached a terminal state. */
-	private volatile CompletableFuture<JobStatus> terminationFuture;
+	private final CompletableFuture<JobStatus> terminationFuture = new CompletableFuture<>();
 
 	/** On each global recovery, this version is incremented. The version breaks conflicts
 	 * between concurrent restart attempts by local failover strategies. */
@@ -299,6 +301,11 @@ public class ExecutionGraph implements AccessExecutionGraph {
 
 	// ------ Fields that are only relevant for archived execution graphs ------------
 	private String jsonPlan;
+
+	/** Shuffle master to register partitions for task deployment. */
+	private final ShuffleMaster<?> shuffleMaster;
+
+	private boolean forcePartitionReleaseOnConsumption;
 
 	// --------------------------------------------------------------------------------------------
 	//   Constructors
@@ -400,7 +407,9 @@ public class ExecutionGraph implements AccessExecutionGraph {
 			slotProvider,
 			userClassLoader,
 			blobWriter,
-			allocationTimeout);
+			allocationTimeout,
+			NettyShuffleMaster.INSTANCE,
+			true);
 	}
 
 	public ExecutionGraph(
@@ -414,7 +423,9 @@ public class ExecutionGraph implements AccessExecutionGraph {
 			SlotProvider slotProvider,
 			ClassLoader userClassLoader,
 			BlobWriter blobWriter,
-			Time allocationTimeout) throws IOException {
+			Time allocationTimeout,
+			ShuffleMaster<?> shuffleMaster,
+			boolean forcePartitionReleaseOnConsumption) throws IOException {
 
 		checkNotNull(futureExecutor);
 
@@ -461,6 +472,10 @@ public class ExecutionGraph implements AccessExecutionGraph {
 			new ComponentMainThreadExecutor.DummyComponentMainThreadExecutor(
 				"ExecutionGraph is not initialized with proper main thread executor. " +
 					"Call to ExecutionGraph.start(...) required.");
+
+		this.shuffleMaster = checkNotNull(shuffleMaster);
+
+		this.forcePartitionReleaseOnConsumption = forcePartitionReleaseOnConsumption;
 
 		LOG.info("Job recovers via failover strategy: {}", failoverStrategy.getStrategyName());
 	}
@@ -512,11 +527,7 @@ public class ExecutionGraph implements AccessExecutionGraph {
 	}
 
 	public void enableCheckpointing(
-			long interval,
-			long checkpointTimeout,
-			long minPauseBetweenCheckpoints,
-			int maxConcurrentCheckpoints,
-			CheckpointRetentionPolicy retentionPolicy,
+			CheckpointCoordinatorConfiguration chkConfig,
 			List<ExecutionJobVertex> verticesToTrigger,
 			List<ExecutionJobVertex> verticesToWaitFor,
 			List<ExecutionJobVertex> verticesToCommitTo,
@@ -525,10 +536,6 @@ public class ExecutionGraph implements AccessExecutionGraph {
 			CompletedCheckpointStore checkpointStore,
 			StateBackend checkpointStateBackend,
 			CheckpointStatsTracker statsTracker) {
-
-		// simple sanity checks
-		checkArgument(interval >= 10, "checkpoint interval must not be below 10ms");
-		checkArgument(checkpointTimeout >= 10, "checkpoint timeout must not be below 10ms");
 
 		checkState(state == JobStatus.CREATED, "Job must be in CREATED state");
 		checkState(checkpointCoordinator == null, "checkpointing already enabled");
@@ -539,14 +546,15 @@ public class ExecutionGraph implements AccessExecutionGraph {
 
 		checkpointStatsTracker = checkNotNull(statsTracker, "CheckpointStatsTracker");
 
+		CheckpointFailureManager failureManager = new CheckpointFailureManager(chkConfig.getTolerableCheckpointFailureNumber(), () ->
+			getJobMasterMainThreadExecutor().execute(() ->
+				failGlobal(new FlinkRuntimeException("Exceeded checkpoint tolerable failure threshold."))
+			));
+
 		// create the coordinator that triggers and commits checkpoints and holds the state
 		checkpointCoordinator = new CheckpointCoordinator(
 			jobInformation.getJobId(),
-			interval,
-			checkpointTimeout,
-			minPauseBetweenCheckpoints,
-			maxConcurrentCheckpoints,
-			retentionPolicy,
+			chkConfig,
 			tasksToTrigger,
 			tasksToWaitFor,
 			tasksToCommitTo,
@@ -554,7 +562,8 @@ public class ExecutionGraph implements AccessExecutionGraph {
 			checkpointStore,
 			checkpointStateBackend,
 			ioExecutor,
-			SharedStateRegistry.DEFAULT_FACTORY);
+			SharedStateRegistry.DEFAULT_FACTORY,
+			failureManager);
 
 		// register the master hooks on the checkpoint coordinator
 		for (MasterTriggerRestoreHook<?> hook : masterHooks) {
@@ -567,7 +576,7 @@ public class ExecutionGraph implements AccessExecutionGraph {
 
 		// interval of max long value indicates disable periodic checkpoint,
 		// the CheckpointActivatorDeactivator should be created only if the interval is not max value
-		if (interval != Long.MAX_VALUE) {
+		if (chkConfig.getCheckpointInterval() != Long.MAX_VALUE) {
 			// the periodic checkpoint scheduler is activated and deactivated as a result of
 			// job status changes (running -> on, all other states -> off)
 			registerJobStatusListener(checkpointCoordinator.createActivatorDeactivator());
@@ -692,6 +701,10 @@ public class ExecutionGraph implements AccessExecutionGraph {
 	public long getNumberOfFullRestarts() {
 		// subtract one, because the version starts at one
 		return globalModVersion - 1;
+	}
+
+	boolean isForcePartitionReleaseOnConsumption() {
+		return forcePartitionReleaseOnConsumption;
 	}
 
 	@Override
@@ -887,7 +900,6 @@ public class ExecutionGraph implements AccessExecutionGraph {
 			newExecJobVertices.add(ejv);
 		}
 
-		terminationFuture = new CompletableFuture<>();
 		failoverStrategy.notifyNewVertices(newExecJobVertices);
 	}
 
@@ -919,9 +931,13 @@ public class ExecutionGraph implements AccessExecutionGraph {
 				schedulingFuture = newSchedulingFuture;
 				newSchedulingFuture.whenComplete(
 					(Void ignored, Throwable throwable) -> {
-						if (throwable != null && !(throwable instanceof CancellationException)) {
-							// only fail if the scheduling future was not canceled
-							failGlobal(ExceptionUtils.stripCompletionException(throwable));
+						if (throwable != null) {
+							final Throwable strippedThrowable = ExceptionUtils.stripCompletionException(throwable);
+
+							if (!(strippedThrowable instanceof CancellationException)) {
+								// only fail if the scheduling future was not canceled
+								failGlobal(strippedThrowable);
+							}
 						}
 					});
 			} else {
@@ -1072,15 +1088,7 @@ public class ExecutionGraph implements AccessExecutionGraph {
 						ongoingSchedulingFuture.cancel(false);
 					}
 
-					final ArrayList<CompletableFuture<?>> futures = new ArrayList<>(verticesInCreationOrder.size());
-
-					// cancel all tasks (that still need cancelling)
-					for (ExecutionJobVertex ejv : verticesInCreationOrder) {
-						futures.add(ejv.cancelWithFuture());
-					}
-
-					// we build a future that is complete once all vertices have reached a terminal state
-					final ConjunctFuture<Void> allTerminal = FutureUtils.waitForAll(futures);
+					final ConjunctFuture<Void> allTerminal = cancelVerticesAsync();
 					allTerminal.whenComplete(
 						(Void value, Throwable throwable) -> {
 							if (throwable != null) {
@@ -1124,6 +1132,18 @@ public class ExecutionGraph implements AccessExecutionGraph {
 				return;
 			}
 		}
+	}
+
+	private ConjunctFuture<Void> cancelVerticesAsync() {
+		final ArrayList<CompletableFuture<?>> futures = new ArrayList<>(verticesInCreationOrder.size());
+
+		// cancel all tasks (that still need cancelling)
+		for (ExecutionJobVertex ejv : verticesInCreationOrder) {
+			futures.add(ejv.cancelWithFuture());
+		}
+
+		// we build a future that is complete once all vertices have reached a terminal state
+		return FutureUtils.waitForAll(futures);
 	}
 
 	/**
@@ -1214,15 +1234,8 @@ public class ExecutionGraph implements AccessExecutionGraph {
 				}
 
 				// we build a future that is complete once all vertices have reached a terminal state
-				final ArrayList<CompletableFuture<?>> futures = new ArrayList<>(verticesInCreationOrder.size());
-
-				// cancel all tasks (that still need cancelling)
-				for (ExecutionJobVertex ejv : verticesInCreationOrder) {
-					futures.add(ejv.cancelWithFuture());
-				}
-
-				final ConjunctFuture<Void> allTerminal = FutureUtils.waitForAll(futures);
-				allTerminal.whenComplete(
+				final ConjunctFuture<Void> allTerminal = cancelVerticesAsync();
+				FutureUtils.assertNoException(allTerminal.handle(
 					(Void ignored, Throwable throwable) -> {
 						if (throwable != null) {
 							transitionState(
@@ -1232,7 +1245,8 @@ public class ExecutionGraph implements AccessExecutionGraph {
 						} else {
 							allVerticesInTerminalState(globalVersionForRestart);
 						}
-					});
+						return null;
+					}));
 
 				return;
 			}
@@ -1800,5 +1814,9 @@ public class ExecutionGraph implements AccessExecutionGraph {
 		if (!(jobMasterMainThreadExecutor instanceof ComponentMainThreadExecutor.DummyComponentMainThreadExecutor)) {
 			jobMasterMainThreadExecutor.assertRunningInMainThread();
 		}
+	}
+
+	ShuffleMaster<?> getShuffleMaster() {
+		return shuffleMaster;
 	}
 }

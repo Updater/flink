@@ -244,7 +244,9 @@ public class JobMasterStopWithSavepointIT extends AbstractTestBase {
 						10,
 						1,
 						CheckpointRetentionPolicy.NEVER_RETAIN_AFTER_TERMINATION,
-						true),
+						true,
+						false,
+						0),
 				null));
 
 		clusterClient.submitJob(jobGraph, ClassLoader.getSystemClassLoader());
@@ -283,13 +285,14 @@ public class JobMasterStopWithSavepointIT extends AbstractTestBase {
 		}
 
 		@Override
-		protected void run() throws InterruptedException {
+		protected void performDefaultAction(ActionContext context) throws Exception {
 			final long taskIndex = getEnvironment().getTaskInfo().getIndexOfThisSubtask();
 			if (taskIndex == 0) {
 				numberOfRestarts.countDown();
 			}
 			invokeLatch.countDown();
 			finishLatch.await();
+			context.allActionsCompleted();
 		}
 
 		@Override
@@ -339,9 +342,10 @@ public class JobMasterStopWithSavepointIT extends AbstractTestBase {
 		}
 
 		@Override
-		protected void run() throws InterruptedException {
+		protected void performDefaultAction(ActionContext context) throws Exception {
 			invokeLatch.countDown();
 			finishLatch.await();
+			context.allActionsCompleted();
 		}
 
 		@Override
@@ -367,8 +371,8 @@ public class JobMasterStopWithSavepointIT extends AbstractTestBase {
 		}
 
 		@Override
-		protected void run() throws Exception {
-
+		protected void performDefaultAction(ActionContext context) throws Exception {
+			context.allActionsCompleted();
 		}
 
 		@Override

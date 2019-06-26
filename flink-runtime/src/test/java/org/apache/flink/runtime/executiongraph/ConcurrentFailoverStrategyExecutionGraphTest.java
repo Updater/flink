@@ -362,7 +362,9 @@ public class ConcurrentFailoverStrategyExecutionGraphTest extends TestLogger {
 			1L,
 			3,
 			CheckpointRetentionPolicy.NEVER_RETAIN_AFTER_TERMINATION,
-			true);
+			true,
+			false,
+			0);
 
 		final ExecutionGraph graph = createSampleGraph(
 			jid,
@@ -385,11 +387,7 @@ public class ConcurrentFailoverStrategyExecutionGraphTest extends TestLogger {
 		final StandaloneCheckpointIDCounter standaloneCheckpointIDCounter = new StandaloneCheckpointIDCounter();
 
 		graph.enableCheckpointing(
-			checkpointCoordinatorConfiguration.getCheckpointInterval(),
-			checkpointCoordinatorConfiguration.getCheckpointTimeout(),
-			checkpointCoordinatorConfiguration.getMinPauseBetweenCheckpoints(),
-			checkpointCoordinatorConfiguration.getMaxConcurrentCheckpoints(),
-			checkpointCoordinatorConfiguration.getCheckpointRetentionPolicy(),
+			checkpointCoordinatorConfiguration,
 			allVertices,
 			allVertices,
 			allVertices,
@@ -444,7 +442,8 @@ public class ConcurrentFailoverStrategyExecutionGraphTest extends TestLogger {
 			new AcknowledgeCheckpoint(
 				graph.getJobID(),
 				vertex1.getCurrentExecutionAttempt().getAttemptId(),
-				checkpointToAcknowledge));
+				checkpointToAcknowledge),
+				"Unknown location");
 
 		Map<Long, PendingCheckpoint> oldPendingCheckpoints = new HashMap<>(3);
 

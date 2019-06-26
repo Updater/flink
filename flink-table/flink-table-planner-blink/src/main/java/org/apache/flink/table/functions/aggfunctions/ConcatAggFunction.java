@@ -18,15 +18,13 @@
 
 package org.apache.flink.table.functions.aggfunctions;
 
-import org.apache.flink.api.common.typeinfo.BasicTypeInfo;
-import org.apache.flink.api.common.typeinfo.TypeInformation;
+import org.apache.flink.table.api.DataTypes;
 import org.apache.flink.table.api.TableException;
 import org.apache.flink.table.expressions.Expression;
 import org.apache.flink.table.expressions.UnresolvedReferenceExpression;
-import org.apache.flink.table.type.InternalType;
-import org.apache.flink.table.type.InternalTypes;
-import org.apache.flink.table.typeutils.BinaryStringTypeInfo;
+import org.apache.flink.table.types.DataType;
 
+import static org.apache.flink.table.expressions.ApiExpressionUtils.unresolvedRef;
 import static org.apache.flink.table.expressions.ExpressionBuilder.concat;
 import static org.apache.flink.table.expressions.ExpressionBuilder.ifThenElse;
 import static org.apache.flink.table.expressions.ExpressionBuilder.isNull;
@@ -38,15 +36,15 @@ import static org.apache.flink.table.expressions.ExpressionBuilder.nullOf;
  */
 public class ConcatAggFunction extends DeclarativeAggregateFunction {
 	private int operandCount;
-	private UnresolvedReferenceExpression acc = new UnresolvedReferenceExpression("concatAcc");
-	private UnresolvedReferenceExpression accDelimiter = new UnresolvedReferenceExpression("accDelimiter");
+	private UnresolvedReferenceExpression acc = unresolvedRef("concatAcc");
+	private UnresolvedReferenceExpression accDelimiter = unresolvedRef("accDelimiter");
 	private Expression delimiter;
 	private Expression operand;
 
 	public ConcatAggFunction(int operandCount) {
 		this.operandCount = operandCount;
 		if (operandCount == 1) {
-			delimiter = literal("\n", BasicTypeInfo.STRING_TYPE_INFO);
+			delimiter = literal("\n", DataTypes.STRING());
 			operand = operand(0);
 		} else {
 			delimiter = operand(0);
@@ -65,20 +63,20 @@ public class ConcatAggFunction extends DeclarativeAggregateFunction {
 	}
 
 	@Override
-	public InternalType[] getAggBufferTypes() {
-		return new InternalType[] { InternalTypes.STRING, InternalTypes.STRING };
+	public DataType[] getAggBufferTypes() {
+		return new DataType[] { DataTypes.STRING(), DataTypes.STRING() };
 	}
 
 	@Override
-	public TypeInformation getResultType() {
-		return BinaryStringTypeInfo.INSTANCE;
+	public DataType getResultType() {
+		return DataTypes.STRING();
 	}
 
 	@Override
 	public Expression[] initialValuesExpressions() {
 		return new Expression[] {
-				/* delimiter */ literal("\n", BasicTypeInfo.STRING_TYPE_INFO),
-				/* acc */ nullOf(BasicTypeInfo.STRING_TYPE_INFO)
+				/* delimiter */ literal("\n", DataTypes.STRING()),
+				/* acc */ nullOf(DataTypes.STRING())
 		};
 	}
 

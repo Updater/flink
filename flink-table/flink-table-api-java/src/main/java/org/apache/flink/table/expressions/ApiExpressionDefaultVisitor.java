@@ -21,60 +21,77 @@ package org.apache.flink.table.expressions;
 import org.apache.flink.annotation.Internal;
 
 /**
- * A utility {@link ApiExpressionVisitor} that calls {@link ApiExpressionDefaultVisitor#defaultMethod(Expression)} by
- * default, unless other methods are overridden explicitly.
+ * A utility {@link ApiExpressionVisitor} that calls {@link #defaultMethod(Expression)} by default,
+ * unless other methods are overridden explicitly.
  */
 @Internal
 public abstract class ApiExpressionDefaultVisitor<T> extends ApiExpressionVisitor<T> {
+
+	protected abstract T defaultMethod(Expression expression);
+
+	// --------------------------------------------------------------------------------------------
+	// resolved expressions
+	// --------------------------------------------------------------------------------------------
+
 	@Override
-	public T visitCall(CallExpression call) {
+	public T visit(CallExpression call) {
 		return defaultMethod(call);
 	}
 
 	@Override
-	public T visitSymbol(SymbolExpression symbolExpression) {
-		return defaultMethod(symbolExpression);
+	public T visit(ValueLiteralExpression valueLiteral) {
+		return defaultMethod(valueLiteral);
 	}
 
 	@Override
-	public T visitValueLiteral(ValueLiteralExpression valueLiteralExpression) {
-		return defaultMethod(valueLiteralExpression);
-	}
-
-	@Override
-	public T visitFieldReference(FieldReferenceExpression fieldReference) {
+	public T visit(FieldReferenceExpression fieldReference) {
 		return defaultMethod(fieldReference);
 	}
 
 	@Override
-	public T visitUnresolvedReference(UnresolvedReferenceExpression unresolvedReference) {
-		return defaultMethod(unresolvedReference);
-	}
-
-	@Override
-	public T visitLocalReference(LocalReferenceExpression localReference) {
-		return defaultMethod(localReference);
-	}
-
-	@Override
-	public T visitTypeLiteral(TypeLiteralExpression typeLiteral) {
+	public T visit(TypeLiteralExpression typeLiteral) {
 		return defaultMethod(typeLiteral);
 	}
 
+	// --------------------------------------------------------------------------------------------
+	// resolved API expressions
+	// --------------------------------------------------------------------------------------------
+
 	@Override
-	public T visitTableReference(TableReferenceExpression tableReference) {
+	public T visit(TableReferenceExpression tableReference) {
 		return defaultMethod(tableReference);
 	}
 
 	@Override
-	public T visitLookupCall(LookupCallExpression lookupCall) {
+	public T visit(LocalReferenceExpression localReference) {
+		return defaultMethod(localReference);
+	}
+
+	// --------------------------------------------------------------------------------------------
+	// unresolved API expressions
+	// --------------------------------------------------------------------------------------------
+
+	@Override
+	public T visit(UnresolvedReferenceExpression unresolvedReference) {
+		return defaultMethod(unresolvedReference);
+	}
+
+	@Override
+	public T visit(LookupCallExpression lookupCall) {
 		return defaultMethod(lookupCall);
 	}
+
+	@Override
+	public T visit(UnresolvedCallExpression unresolvedCall) {
+		return defaultMethod(unresolvedCall);
+	}
+
+	// --------------------------------------------------------------------------------------------
+	// other expressions
+	// --------------------------------------------------------------------------------------------
 
 	@Override
 	public T visitNonApiExpression(Expression other) {
 		return defaultMethod(other);
 	}
-
-	protected abstract T defaultMethod(Expression expression);
 }

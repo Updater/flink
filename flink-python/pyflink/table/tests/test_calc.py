@@ -1,4 +1,4 @@
-# ###############################################################################
+################################################################################
 #  Licensed to the Apache Software Foundation (ASF) under one
 #  or more contributor license agreements.  See the NOTICE file
 #  distributed with this work for additional information
@@ -16,46 +16,87 @@
 # limitations under the License.
 ################################################################################
 
-import os
+import array
+import datetime
+from decimal import Decimal
 
-from pyflink.table.table_source import CsvTableSource
-from pyflink.table.types import DataTypes
+from pyflink.table import DataTypes, Row
+from pyflink.table.tests.test_types import ExamplePoint, PythonOnlyPoint, ExamplePointUDT, \
+    PythonOnlyUDT
 from pyflink.testing import source_sink_utils
 from pyflink.testing.test_case_utils import PyFlinkStreamTableTestCase
 
 
-class TableTests(PyFlinkStreamTableTestCase):
+class StreamTableCalcTests(PyFlinkStreamTableTestCase):
 
     def test_select(self):
-        source_path = os.path.join(self.tempdir + '/streaming.csv')
-        with open(source_path, 'w') as f:
-            lines = '1,hi,hello\n' + '2,hi,hello\n'
-            f.write(lines)
-            f.close()
+        t = self.t_env.from_elements([(1, 'hi', 'hello')], ['a', 'b', 'c'])
+        result = t.select("a + 1, b, c")
+        query_operation = result._j_table.getQueryOperation()
+        self.assertEqual('[`default_catalog`.`default_database`.`plus`(a, 1), b, c]',
+                         query_operation.getProjectList().toString())
 
-        field_names = ["a", "b", "c"]
-        field_types = [DataTypes.INT, DataTypes.STRING, DataTypes.STRING]
+    def test_alias(self):
+        t = self.t_env.from_elements([(1, 'Hi', 'Hello')], ['a', 'b', 'c'])
+        result = t.alias("d, e, f").select("d, e, f")
+        table_schema = result._j_table.getQueryOperation().getTableSchema()
+        self.assertEqual(['d', 'e', 'f'], list(table_schema.getFieldNames()))
 
+    def test_where(self):
         t_env = self.t_env
+        t = t_env.from_elements([(1, 'Hi', 'Hello')], ['a', 'b', 'c'])
+        result = t.where("a > 1 && b = 'Hello'")
+        query_operation = result._j_table.getQueryOperation()
+        self.assertEqual("`default_catalog`.`default_database`.`and`("
+                         "`default_catalog`.`default_database`.`greaterThan`(a, 1), "
+                         "`default_catalog`.`default_database`.`equals`(b, 'Hello'))",
+                         query_operation.getCondition().toString())
 
-        # register Orders table in table environment
-        t_env.register_table_source(
-            "Orders",
-            CsvTableSource(source_path, field_names, field_types))
+    def test_filter(self):
+        t = self.t_env.from_elements([(1, 'Hi', 'Hello')], ['a', 'b', 'c'])
+        result = t.filter("a > 1 && b = 'Hello'")
+        query_operation = result._j_table.getQueryOperation()
+        self.assertEqual("`default_catalog`.`default_database`.`and`("
+                         "`default_catalog`.`default_database`.`greaterThan`(a, 1), "
+                         "`default_catalog`.`default_database`.`equals`(b, 'Hello'))",
+                         query_operation.getCondition().toString())
 
-        t_env.register_table_sink(
-            "Results",
-            field_names, field_types, source_sink_utils.TestAppendSink())
+    def test_from_element(self):
+        t_env = self.t_env
+        a = array.array('b')
+        a.fromstring('ABCD')
+        t = t_env.from_elements(
+            [(1, 1.0, "hi", "hello", datetime.date(1970, 1, 2), datetime.time(1, 0, 0),
+             datetime.datetime(1970, 1, 2, 0, 0), [1.0, None], array.array("d", [1.0, 2.0]),
+             ["abc"], [datetime.date(1970, 1, 2)], Decimal(1), Row("a", "b")(1, 2.0),
+             {"key": 1.0}, a, ExamplePoint(1.0, 2.0),
+             PythonOnlyPoint(3.0, 4.0))])
+        field_names = ["a", "b", "c", "d", "e", "f", "g", "h",
+                       "i", "j", "k", "l", "m", "n", "o", "p", "q"]
+        field_types = [DataTypes.BIGINT(), DataTypes.DOUBLE(), DataTypes.STRING(),
+                       DataTypes.STRING(), DataTypes.DATE(),
+                       DataTypes.TIME(),
+                       DataTypes.TIMESTAMP(),
+                       DataTypes.ARRAY(DataTypes.DOUBLE()),
+                       DataTypes.ARRAY(DataTypes.DOUBLE(False)),
+                       DataTypes.ARRAY(DataTypes.STRING()),
+                       DataTypes.ARRAY(DataTypes.DATE()),
+                       DataTypes.DECIMAL(10, 0),
+                       DataTypes.ROW([DataTypes.FIELD("a", DataTypes.BIGINT()),
+                                      DataTypes.FIELD("b", DataTypes.DOUBLE())]),
+                       DataTypes.MAP(DataTypes.STRING(), DataTypes.DOUBLE()),
+                       DataTypes.BYTES(), ExamplePointUDT(),
+                       PythonOnlyUDT()]
+        table_sink = source_sink_utils.TestAppendSink(field_names, field_types)
+        t_env.register_table_sink("Results", table_sink)
 
-        t_env.scan("Orders") \
-             .where("a > 0") \
-             .select("a + 1, b, c") \
-             .insert_into("Results")
-
-        t_env.execute()
-
+        t.insert_into("Results")
+        t_env.exec_env().execute()
         actual = source_sink_utils.results()
-        expected = ['2,hi,hello', '3,hi,hello']
+
+        expected = ['1,1.0,hi,hello,1970-01-02,01:00:00,1970-01-02 00:00:00.0,[1.0, null],'
+                    '[1.0, 2.0],[abc],[1970-01-02],1,1,2.0,{key=1.0},[65, 66, 67, 68],[1.0, 2.0],'
+                    '[3.0, 4.0]']
         self.assert_equals(actual, expected)
 
 

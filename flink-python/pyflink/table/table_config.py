@@ -15,8 +15,14 @@
 #  See the License for the specific language governing permissions and
 # limitations under the License.
 ################################################################################
+import sys
+
+from pyflink.java_gateway import get_gateway
 
 __all__ = ['TableConfig']
+
+if sys.version > '3':
+    unicode = str
 
 
 class TableConfig(object):
@@ -25,68 +31,98 @@ class TableConfig(object):
     """
 
     def __init__(self):
-        self._is_stream = None
-        self._parallelism = None
+        self._jvm = get_gateway().jvm
+        self._j_table_config = self._jvm.TableConfig()
+        self._is_stream = None  # type: bool
+        self._parallelism = None  # type: int
 
-    @property
-    def is_stream(self):
-        return self._is_stream
+    def get_timezone(self):
+        """
+        Returns the timezone id, either an abbreviation such as "PST", a full name such as
+        "America/Los_Angeles", or a custom timezone_id such as "GMT-8:00".
+        """
+        return self._j_table_config.getTimeZone().getID()
 
-    @is_stream.setter
-    def is_stream(self, is_stream):
-        self._is_stream = is_stream
+    def set_timezone(self, timezone_id):
+        """
+        Sets the timezone id for date/time/timestamp conversions.
 
-    @property
-    def parallelism(self):
-        return self._parallelism
+        :param timezone_id: The timezone id, either an abbreviation such as "PST", a full name
+                            such as "America/Los_Angeles", or a custom timezone_id such as
+                            "GMT-8:00".
+        """
+        if timezone_id is not None and isinstance(timezone_id, (str, unicode)):
+            j_timezone = self._jvm.java.util.TimeZone.getTimeZone(timezone_id)
+            self._j_table_config.setTimeZone(j_timezone)
+        else:
+            raise Exception("TableConfig.timezone should be a string!")
 
-    @parallelism.setter
-    def parallelism(self, parallelism):
-        self._parallelism = parallelism
+    def get_null_check(self):
+        """
+        A boolean value, "True" enables NULL check and "False" disables NULL check.
+        """
+        return self._j_table_config.getNullCheck()
 
-    class Builder(object):
+    def set_null_check(self, null_check):
+        """
+        Sets the NULL check. If enabled, all fields need to be checked for NULL first.
+        """
+        if null_check is not None and isinstance(null_check, bool):
+            self._j_table_config.setNullCheck(null_check)
+        else:
+            raise Exception("TableConfig.null_check should be a bool value!")
 
-        def __init__(self):
-            self._is_stream = None
-            self._parallelism = None
+    def get_max_generated_code_length(self):
+        """
+        The current threshold where generated code will be split into sub-function calls. Java has
+        a maximum method length of 64 KB. This setting allows for finer granularity if necessary.
+        Default is 64000.
+        """
+        return self._j_table_config.getMaxGeneratedCodeLength()
 
-        def as_streaming_execution(self):
-            """
-            Configures streaming execution mode.
-            If this method is called, :class:`StreamTableEnvironment` will be created.
+    def set_max_generated_code_length(self, max_generated_code_length):
+        """
+        Returns the current threshold where generated code will be split into sub-function calls.
+        Java has a maximum method length of 64 KB. This setting allows for finer granularity if
+        necessary. Default is 64000.
+        """
+        if max_generated_code_length is not None and isinstance(max_generated_code_length, int):
+            self._j_table_config.setMaxGeneratedCodeLength(max_generated_code_length)
+        else:
+            raise Exception("TableConfig.max_generated_code_length should be a int value!")
 
-            :return: Builder
-            """
-            self._is_stream = True
-            return self
+    def get_built_in_catalog_name(self):
+        """
+        Gets the specified name of the initial catalog to be created when instantiating
+        :class:`TableEnvironment`.
+        """
+        return self._j_table_config.getBuiltInCatalogName()
 
-        def as_batch_execution(self):
-            """
-            Configures batch execution mode.
-            If this method is called, :class:`BatchTableEnvironment` will be created.
+    def set_built_in_catalog_name(self, built_in_catalog_name):
+        """
+        Specifies the name of the initial catalog to be created when instantiating
+        :class:`TableEnvironment`. This method has no effect if called on the
+        :func:`~pyflink.table.TableEnvironment.get_config`.
+        """
+        if built_in_catalog_name is not None and isinstance(built_in_catalog_name, str):
+            self._j_table_config.setBuiltInCatalogName(built_in_catalog_name)
+        else:
+            raise Exception("TableConfig.built_in_catalog_name should be a string value!")
 
-            :return: Builder
-            """
-            self._is_stream = False
-            return self
+    def get_built_in_database_name(self):
+        """
+        Gets the specified name of the default database in the initial catalog to be created when
+        instantiating :class:`TableEnvironment`.
+        """
+        return self._j_table_config.getBuiltInDatabaseName()
 
-        def set_parallelism(self, parallelism):
-            """
-            Sets the parallelism for all operations.
-
-            :param parallelism: The parallelism.
-            :return: Builder
-            """
-            self._parallelism = parallelism
-            return self
-
-        def build(self):
-            """
-            Builds :class:`TableConfig` object.
-
-            :return: TableConfig
-            """
-            config = TableConfig()
-            config.parallelism = self._parallelism
-            config.is_stream = self._is_stream
-            return config
+    def set_built_in_database_name(self, built_in_database_name):
+        """
+        Specifies the name of the default database in the initial catalog to be created when
+        instantiating :class:`TableEnvironment`. This method has no effect if called on the
+        :func:`~pyflink.table.TableEnvironment.get_config`.
+        """
+        if built_in_database_name is not None and isinstance(built_in_database_name, str):
+            self._j_table_config.setBuiltInDatabaseName(built_in_database_name)
+        else:
+            raise Exception("TableConfig.built_in_database_name should be a string value!")
