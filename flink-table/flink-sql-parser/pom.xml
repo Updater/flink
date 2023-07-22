@@ -35,7 +35,7 @@ under the License.
 	<properties>
 		<!-- override parent pom -->
 		<test.excludedGroups/>
-		<calcite.version>1.18.0</calcite.version>
+		<calcite.version>1.32.0</calcite.version>
 	</properties>
 
 	<dependencies>
